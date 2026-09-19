@@ -2,6 +2,22 @@ import XCTest
 @testable import SlopdiffCore
 
 final class ReviewStoreTests: XCTestCase {
+    func testDiffLayoutIsRememberedWithoutChangingReviewPreferences() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("slopdiff-layout-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ReviewStore(directory: directory)
+        var preferences = ReviewPreferences(filters: .init(tests: false), repositoryMappings: ["owner/repo": "/checkout"],
+                                            softWrap: true, diffLayout: .unified)
+        try store.savePreferences(preferences)
+        let restored = try ReviewStore(directory: directory).loadPreferences()
+        XCTAssertEqual(restored.diffLayout, .unified)
+        XCTAssertTrue(restored.softWrap)
+        XCTAssertFalse(restored.filters.tests)
+        XCTAssertEqual(restored.repositoryMappings, preferences.repositoryMappings)
+        preferences.diffLayout = .split
+        try store.savePreferences(preferences)
+        XCTAssertEqual(try store.loadPreferences().diffLayout, .split)
+    }
     func testWrappingPreferenceRoundTripsAndMissingSettingKeepsExistingContent() throws {
         let preferences = ReviewPreferences(repositoryMappings: ["owner/repo": "/checkout"], softWrap: true)
         let decoded = try JSONDecoder().decode(ReviewPreferences.self, from: JSONEncoder().encode(preferences))
@@ -10,6 +26,7 @@ final class ReviewStoreTests: XCTestCase {
         let prior = Data(#"{"filters":{"tests":false,"documentation":true,"generated":false},"repositoryMappings":{"owner/repo":"/checkout"},"recentComparisons":[]}"#.utf8)
         let upgraded = try JSONDecoder().decode(ReviewPreferences.self, from: prior)
         XCTAssertFalse(upgraded.softWrap)
+        XCTAssertEqual(upgraded.diffLayout, .split)
         XCTAssertFalse(upgraded.filters.tests)
         XCTAssertEqual(upgraded.repositoryMappings, preferences.repositoryMappings)
     }

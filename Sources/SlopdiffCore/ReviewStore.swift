@@ -1,25 +1,32 @@
 import Foundation
 import CryptoKit
 
+public enum DiffLayout: String, Codable, Sendable {
+    case split, unified
+}
+
 public struct ReviewPreferences: Codable, Sendable {
     public var filters: ReviewFilters
     public var repositoryMappings: [String: String]
     public var recentComparisons: [ComparisonRequest]
     public var softWrap: Bool
+    public var diffLayout: DiffLayout
     public init(filters: ReviewFilters = .init(), repositoryMappings: [String: String] = [:],
-                recentComparisons: [ComparisonRequest] = [], softWrap: Bool = false) {
+                recentComparisons: [ComparisonRequest] = [], softWrap: Bool = false, diffLayout: DiffLayout = .split) {
         self.filters = filters
         self.repositoryMappings = repositoryMappings
         self.recentComparisons = recentComparisons
         self.softWrap = softWrap
+        self.diffLayout = diffLayout
     }
-    private enum CodingKeys: String, CodingKey { case filters, repositoryMappings, recentComparisons, softWrap }
+    private enum CodingKeys: String, CodingKey { case filters, repositoryMappings, recentComparisons, softWrap, diffLayout }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         filters = try values.decode(ReviewFilters.self, forKey: .filters)
         repositoryMappings = try values.decode([String: String].self, forKey: .repositoryMappings)
         recentComparisons = try values.decode([ComparisonRequest].self, forKey: .recentComparisons)
         softWrap = try values.decodeIfPresent(Bool.self, forKey: .softWrap) ?? false
+        diffLayout = try values.decodeIfPresent(DiffLayout.self, forKey: .diffLayout) ?? .split
     }
 }
 

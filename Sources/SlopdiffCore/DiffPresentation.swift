@@ -13,6 +13,29 @@ public enum PresentedRow: Sendable {
 }
 
 public enum DiffPresentation {
+    /// Keeps the paired counterpart for word emphasis while ordering each
+    /// contiguous edit as deletions followed by additions in a unified view.
+    public static func sourceRows(_ pairs: [DiffPair], layout: DiffLayout) -> [(pair: DiffPair, side: DiffSide?)] {
+        guard layout == .unified else { return pairs.map { ($0, nil) } }
+        var result: [(pair: DiffPair, side: DiffSide?)] = []
+        var changed: [DiffPair] = []
+        func flush() {
+            result += changed.filter { $0.old != nil }.map { ($0, .old) }
+            result += changed.filter { $0.new != nil }.map { ($0, .new) }
+            changed.removeAll(keepingCapacity: true)
+        }
+        for pair in pairs {
+            if pair.new?.kind == .context || pair.old?.kind == .context {
+                flush()
+                result.append((pair, pair.new == nil ? .old : .new))
+            } else {
+                changed.append(pair)
+            }
+        }
+        flush()
+        return result
+    }
+
     public static func rows(for file: FileDiff) -> [PresentedRow] {
         var result: [PresentedRow] = []
         let ext = (file.path as NSString).pathExtension.lowercased()

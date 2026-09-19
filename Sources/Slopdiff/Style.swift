@@ -18,8 +18,18 @@ enum Style {
     static func button(_ title: String, icon: String? = nil, target: AnyObject?, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: target, action: action)
         button.bezelStyle = .glass
+        button.toolTip = title.isEmpty ? nil : title
         if let icon { button.image = Icons.image(icon); button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading }
         return button
+    }
+    static func animateStateChange(_ view: NSView?) {
+        guard let view, view.window?.isVisible == true else { return }
+        view.wantsLayer = true
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = 0.16
+        transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        view.layer?.add(transition, forKey: "stateChange")
     }
     static func stack(_ views: [NSView], orientation: NSUserInterfaceLayoutOrientation = .horizontal, spacing: CGFloat = 8) -> NSStackView {
         let stack = NSStackView(views: views)
@@ -51,6 +61,11 @@ enum Icons {
     }
     private static var cache: [String: NSImage] = [:]
     private static var tinted: [TintKey: NSImage] = [:]
+    static func toolbarImage(_ name: String) -> NSImage? {
+        guard let image = (image(name) ?? NSImage(systemSymbolName: name, accessibilityDescription: nil))?.copy() as? NSImage else { return nil }
+        image.size = NSSize(width: 20, height: 20)
+        return image
+    }
     static func draw(_ name: String, in rect: NSRect, color: NSColor = .secondaryLabelColor) {
         let key = TintKey(name: name, dark: Style.dark, color: color)
         if tinted[key] == nil, let original = image(name) {
@@ -71,6 +86,14 @@ enum Icons {
         image.isTemplate = true
         cache[name] = image
         return image
+    }
+}
+
+final class AnimatedCheckbox: NSButton {
+    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+        let sent = super.sendAction(action, to: target)
+        Style.animateStateChange(self)
+        return sent
     }
 }
 

@@ -5,4 +5,5 @@ struct FileHorizontalMetrics {
     var newWidth: CGFloat = 0
     var oldOffset: CGFloat = 0
     var newOffset: CGFloat = 0
+    var unifiedOffset: CGFloat = 0
 }

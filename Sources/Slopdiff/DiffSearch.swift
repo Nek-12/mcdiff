@@ -75,7 +75,7 @@ extension FileDiff {
 
 actor DiffSearchEngine {
     func search(query: String, files: [FileDiff], presentations: [String: [PresentedRow]],
-                markdown: [String: MarkdownFileContent], sourcePaths: Set<String>) throws -> DiffSearchResults {
+                markdown: [String: MarkdownFileContent], sourcePaths: Set<String>, layout: DiffLayout = .split) throws -> DiffSearchResults {
         var groups: [DiffSearchResults.Group] = []
         var matchingFiles: [Int] = []
         var count = 0
@@ -96,6 +96,7 @@ actor DiffSearchEngine {
             if RenderedMarkdown.accepts(file.path), !sourcePaths.contains(file.path) {
                 if let content = markdown[file.path], content.error == nil {
                     for (side, source) in [(DiffSide.old, content.old), (.new, content.new)] {
+                        if layout == .unified && side == .old { continue }
                         guard let source else { continue }
                         try Task.checkCancellation()
                         let text = RenderedMarkdown.text(source, color: .black, secondary: .gray).string
@@ -104,17 +105,11 @@ actor DiffSearchEngine {
                 }
                 continue
             }
-            for (block, presentation) in (presentations[file.path] ?? []).enumerated() {
-                try Task.checkCancellation()
-                let pairs: [DiffPair], importBlock: Int?
-                switch presentation {
-                case .hunk: continue
-                case .code(let pair): pairs = [pair]; importBlock = nil
-                case .imports(let value): pairs = value; importBlock = block
-                }
-                for pair in pairs {
-                    // Context is displayed twice but represents one unchanged
-                    // occurrence. Navigate on the new side; paint both sides.
+            var code: [DiffPair] = []
+            func appendPairs(_ pairs: [DiffPair], importBlock: Int?) throws {
+                for row in DiffPresentation.sourceRows(pairs, layout: layout) {
+                    let pair = row.pair
+                    // Context is one occurrence in either layout.
                     if let line = pair.new, line.kind == .context, pair.old?.text == line.text,
                        let number = line.newNumber {
                         try append(line.text.replacingOccurrences(of: "\t", with: "    "),
@@ -122,17 +117,49 @@ actor DiffSearchEngine {
                         continue
                     }
                     for (side, line) in [(DiffSide.old, pair.old), (.new, pair.new)] {
+                        if let displayed = row.side, displayed != side { continue }
                         guard let line, let number = side == .old ? line.oldNumber : line.newNumber else { continue }
                         try append(line.text.replacingOccurrences(of: "\t", with: "    "),
                                    target: .code(file: index, side: side, line: number, importBlock: importBlock))
                     }
                 }
             }
+            func flush() throws {
+                try appendPairs(code, importBlock: nil)
+                code.removeAll(keepingCapacity: true)
+            }
+            for (block, presentation) in (presentations[file.path] ?? []).enumerated() {
+                try Task.checkCancellation()
+                switch presentation {
+                case .hunk: try flush()
+                case .code(let pair): code.append(pair)
+                case .imports(let pairs):
+                    try flush()
+                    try appendPairs(pairs, importBlock: block)
+                }
+            }
+            try flush()
         }
         return DiffSearchResults(query: query, groups: groups, files: matchingFiles)
     }
 
     func resolve(_ results: DiffSearchResults, at index: Int) throws -> DiffSearchMatch? {
         try results.match(at: index)
+    }
+
+    func index(of match: DiffSearchMatch, in results: DiffSearchResults) throws -> Int? {
+        var start = 0
+        for group in results.groups {
+            try Task.checkCancellation()
+            if group.target == match.target {
+                for (offset, range) in LiteralSearch.matches(results.query, in: group.text).enumerated() {
+                    try Task.checkCancellation()
+                    if range == match.range { return start + offset }
+                }
+                return nil
+            }
+            start = group.end
+        }
+        return nil
     }
 }

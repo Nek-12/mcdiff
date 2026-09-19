@@ -197,17 +197,17 @@ final class MarkdownPairLayout: NSObject {
     var height: CGFloat { max(44, max(old.height, new.height) + 36) }
     var cost: Int { (old.storage.length + new.storage.length) * 64 }
 
-    init(content: MarkdownFileContent, width: CGFloat, color: NSColor, secondary: NSColor) {
-        old = MarkdownTextLayout(RenderedMarkdown.text(content.old ?? "", color: color, secondary: secondary), width: width)
+    init(content: MarkdownFileContent, width: CGFloat, color: NSColor, secondary: NSColor, mode: DiffLayout = .split) {
+        old = MarkdownTextLayout(RenderedMarkdown.text(mode == .split ? content.old ?? "" : "", color: color, secondary: secondary), width: width)
         new = MarkdownTextLayout(RenderedMarkdown.text(content.new ?? "", color: color, secondary: secondary), width: width)
     }
 }
 
 actor MarkdownLayoutService {
     func layout(content: MarkdownFileContent, width: CGFloat, color: NSColor,
-                secondary: NSColor) throws -> MarkdownPairLayout {
+                secondary: NSColor, mode: DiffLayout = .split) throws -> MarkdownPairLayout {
         try Task.checkCancellation()
-        let result = MarkdownPairLayout(content: content, width: width, color: color, secondary: secondary)
+        let result = MarkdownPairLayout(content: content, width: width, color: color, secondary: secondary, mode: mode)
         try Task.checkCancellation()
         return result
     }

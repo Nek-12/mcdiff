@@ -74,4 +74,25 @@ final class DiffPresentationTests: XCTestCase {
         let long = String(repeating: "x", count: 100_000)
         XCTAssertEqual(WordDiff.ranges(old: long, new: long + "y").old, [NSRange(location: 0, length: 100_000)])
     }
+
+    func testUnifiedOrdersEachEditBlockWithoutDuplicatingContextOrLosingCounterpart() {
+        let context = DiffLine(kind: .context, text: "same", oldNumber: 4, newNumber: 6)
+        let pairs = [
+            DiffPair(old: DiffLine(kind: .deletion, text: "old one", oldNumber: 1, newNumber: nil),
+                     new: DiffLine(kind: .addition, text: "new one", oldNumber: nil, newNumber: 1)),
+            DiffPair(old: DiffLine(kind: .deletion, text: "old two", oldNumber: 2, newNumber: nil),
+                     new: DiffLine(kind: .addition, text: "new two", oldNumber: nil, newNumber: 2)),
+            DiffPair(old: nil, new: DiffLine(kind: .addition, text: "extra", oldNumber: nil, newNumber: 3)),
+            DiffPair(old: context, new: context),
+            DiffPair(old: DiffLine(kind: .deletion, text: "removed", oldNumber: 5, newNumber: nil), new: nil)
+        ]
+        let rows = DiffPresentation.sourceRows(pairs, layout: .unified)
+        XCTAssertEqual(rows.map { $0.side == .old ? $0.pair.old?.text : $0.pair.new?.text },
+                       ["old one", "old two", "new one", "new two", "extra", "same", "removed"])
+        XCTAssertEqual(rows.map(\.side), [.old, .old, .new, .new, .new, .new, .old])
+        XCTAssertEqual(rows[0].pair.new?.text, "new one", "Keep paired text for word emphasis")
+        XCTAssertEqual(rows[5].pair.old?.oldNumber, 4)
+        XCTAssertEqual(rows[5].pair.new?.newNumber, 6)
+        XCTAssertEqual(DiffPresentation.sourceRows(pairs, layout: .split).count, pairs.count)
+    }
 }

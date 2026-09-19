@@ -9,7 +9,7 @@ final class ComparisonSheet: NSWindowController {
     private let targetField = NSPopUpButton()
     private let revisionField = NSTextField()
     private let revisionItem = NSMenuItem(title: "Revision…", action: nil, keyEquivalent: "")
-    private let mergeBase = NSButton(checkboxWithTitle: "Compare from common ancestor (changes since branching)", target: nil, action: nil)
+    private let mergeBase = AnimatedCheckbox(checkboxWithTitle: "Compare from common ancestor (changes since branching)", target: nil, action: nil)
     private let descriptionField = Style.label("", size: 11, color: .secondaryLabelColor)
     private let prContent = NSView()
     private let localContent = NSView()
@@ -27,6 +27,8 @@ final class ComparisonSheet: NSWindowController {
         window.contentView = root
         tabs.selectedSegment = 0; tabs.target = self; tabs.action = #selector(tabChanged)
         tabs.segmentStyle = .automatic
+        tabs.setToolTip("Open a GitHub pull request using an existing checkout", forSegment: 0)
+        tabs.setToolTip("Compare local branches, revisions, or working changes", forSegment: 1)
         if #available(macOS 27, *) { tabs.role = .tabs }
         let title = Style.label("Open review", size: 17, weight: .semibold)
         let close = Style.button("", icon: "x", target: self, action: #selector(cancel))
@@ -59,16 +61,19 @@ final class ComparisonSheet: NSWindowController {
         let baseLabel = Style.label("Base")
         let targetLabel = Style.label("Target")
         baseField.usesDataSource = false; baseField.completes = true; baseField.stringValue = recent?.base ?? "main"
+        baseField.toolTip = "Base branch, tag, or commit"
         targetField.addItem(withTitle: "Working tree")
         if let target = recent?.target { targetField.addItem(withTitle: target); targetField.lastItem?.representedObject = target; targetField.selectItem(at: 1) }
         targetField.menu?.addItem(revisionItem)
         targetField.target = self; targetField.action = #selector(targetChanged)
         revisionField.placeholderString = "Tag, commit, or ref"
+        revisionField.toolTip = "Target tag, commit, or Git ref"
         revisionField.isHidden = true
         targetField.toolTip = "Working tree includes every committed, staged, unstaged and non-ignored untracked change."
         let refs = Style.stack([baseLabel, baseField, targetLabel, targetField, revisionField], spacing: 12)
         revisionField.widthAnchor.constraint(equalToConstant: 160).isActive = true
         mergeBase.state = (recent?.mergeBase ?? true) ? .on : .off
+        mergeBase.toolTip = "Compare against the common ancestor instead of the base revision itself"
         let localStack = Style.stack([repoRow, refs, mergeBase], orientation: .vertical, spacing: 12)
         Style.pin(localStack, in: localContent)
         repoRow.widthAnchor.constraint(equalTo: localStack.widthAnchor).isActive = true
@@ -104,6 +109,7 @@ final class ComparisonSheet: NSWindowController {
     @objc private func tabChanged() {
         prContent.isHidden = tabs.selectedSegment != 0
         localContent.isHidden = tabs.selectedSegment != 1
+        Style.animateStateChange(tabs.selectedSegment == 0 ? prContent : localContent)
     }
     @objc private func targetChanged() {
         revisionField.isHidden = targetField.selectedItem !== revisionItem

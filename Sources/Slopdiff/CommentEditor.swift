@@ -42,6 +42,8 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         path.toolTip = comment.path
         startField.stringValue = String(comment.startLine)
         endField.stringValue = String(comment.endLine)
+        startField.toolTip = "First line of the comment range"
+        endField.toolTip = "Last line of the comment range"
         for field in [startField, endField] {
             field.drawsBackground = false
             field.isBezeled = false
@@ -139,6 +141,8 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
     private var hasText: Bool { !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private func updateControls() {
+        let previousStatus = status.stringValue
+        let previousTitle = cancelButton.title
         saveButton.isEnabled = validRange != nil && hasText
         cancelButton.title = "Cancel"
         status.textColor = .secondaryLabelColor
@@ -154,6 +158,9 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         }
         status.toolTip = status.stringValue
         status.isHidden = status.stringValue.isEmpty
+        cancelButton.toolTip = cancelButton.title == "Discard" ? "Discard unsaved changes" : "Cancel (Escape)"
+        if previousStatus != status.stringValue { Style.animateStateChange(status) }
+        if previousTitle != cancelButton.title { Style.animateStateChange(cancelButton) }
     }
 
     private func edited() {

@@ -26,6 +26,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var commentsButton: NSToolbarItem!
     private var feedbackActions: NSToolbarItemGroup!
     private var wrapButton: NSToolbarItemGroup!
+    private var layoutButton: NSToolbarItem!
     private let splitController = NSSplitViewController()
     private var toolbarItems: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     private let toolbarOrder: [NSToolbarItem.Identifier] = [
@@ -37,14 +38,15 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private let emptyToolbarOrder: [NSToolbarItem.Identifier] = [
         .init("welcomeSources"), .init("status"), .flexibleSpace
     ]
-    private let testsFilter = NSButton(checkboxWithTitle: "Tests", target: nil, action: nil)
-    private let docsFilter = NSButton(checkboxWithTitle: "Documentation / non-code", target: nil, action: nil)
-    private let noiseFilter = NSButton(checkboxWithTitle: "Generated / noise", target: nil, action: nil)
+    private let testsFilter = AnimatedCheckbox(checkboxWithTitle: "Tests", target: nil, action: nil)
+    private let docsFilter = AnimatedCheckbox(checkboxWithTitle: "Documentation / non-code", target: nil, action: nil)
+    private let noiseFilter = AnimatedCheckbox(checkboxWithTitle: "Generated / noise", target: nil, action: nil)
     private let empty = NSView()
     private enum Activity { case comparison, layout, search }
     private var activities: Set<Activity> = []
     private var busy: Bool { activities.contains(.comparison) }
     private var statusDismissal: DispatchWorkItem?
+    private var copyConfirmation: DispatchWorkItem?
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 940),
@@ -77,6 +79,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             updateFilters()
             diff.softWrap = preferences.softWrap
             wrapButton.setSelected(preferences.softWrap, at: 0)
+            diff.diffLayout = preferences.diffLayout
+            updateLayoutButton()
             if let i = args.firstIndex(of: "--repo"), args.indices.contains(i + 1) {
                 let base = args.firstIndex(of: "--base").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "main"
                 let target = args.firstIndex(of: "--target").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil }
@@ -116,11 +120,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         window.contentViewController = backdrop
         splitController.splitView.setPosition(290, ofDividerAt: 0)
 
-        func toolbarIcon(_ name: String) -> NSImage? {
-            guard let image = (Icons.image(name) ?? NSImage(systemSymbolName: name, accessibilityDescription: nil))?.copy() as? NSImage else { return nil }
-            image.size = NSSize(width: 20, height: 20)
-            return image
-        }
+        let toolbarIcon = Icons.toolbarImage
         func item(_ id: String, _ title: String, _ icon: String, _ action: Selector?, text: Bool = false) -> NSToolbarItem {
             let identifier = NSToolbarItem.Identifier(id)
             let item = NSToolbarItem(itemIdentifier: identifier)
@@ -163,9 +163,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             group.autovalidates = false
             toolbarItems[group.itemIdentifier] = group
         }
-        let split = item("split", "Split", "rectangle.split.2x1", nil, text: true)
-        split.isEnabled = false
-        split.toolTip = "Split · not available yet"
+        layoutButton = item("split", "Unified", "rectangle", #selector(layoutChanged), text: true)
+        updateLayoutButton()
         feedbackActions = NSToolbarItemGroup(itemIdentifier: .init("feedback"),
             images: [toolbarIcon("message-square")!, toolbarIcon("copy")!, toolbarIcon("square.and.arrow.down")!],
             selectionMode: .momentary, labels: ["Comments", "Copy review", "Export Markdown"],
@@ -176,6 +175,15 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         commentsButton = feedbackActions.subitems[0]
         finishButton = feedbackActions.subitems[1]
         toolbarItems[feedbackActions.itemIdentifier] = feedbackActions
+        for group in [sources, welcomeSources, navigation, wrapButton!, feedbackActions!] {
+            for subitem in group.subitems { subitem.toolTip = subitem.label }
+        }
+        sources.subitems[0].toolTip = "Open comparison (⌘O)"
+        welcomeSources.subitems[0].toolTip = "Open comparison (⌘O)"
+        navigation.subitems[0].toolTip = "Next file (⌥↓)"
+        navigation.subitems[1].toolTip = "Previous file (⌥↑)"
+        navigation.subitems[2].toolTip = "Mark reviewed and go to the next unreviewed file (⌘J)"
+        wrapButton.subitems.first?.toolTip = "Toggle soft wrapping of long lines"
 
         spinner.style = .spinning; spinner.controlSize = .small; spinner.isDisplayedWhenStopped = false
         let context = NSToolbarItem(itemIdentifier: .init("status"))
@@ -188,6 +196,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         searchItem.searchField = search
         searchItem.preferredWidthForSearchField = 230
         searchItem.label = "Search review"
+        searchItem.toolTip = "Search paths and displayed text (⌘F)"
+        search.toolTip = "Search paths and displayed text (⌘F); Return / Shift-Return navigates matches"
         toolbarItems[searchItem.itemIdentifier] = searchItem
         let toolbar = NSToolbar(identifier: "Slopdiff.review")
         toolbar.delegate = self
@@ -494,6 +504,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         refreshButton?.isEnabled = snapshot != nil && !busy
         commentsButton?.toolTip = "\(progress.comments.count) comments"
         commentsButton?.isEnabled = !progress.comments.isEmpty && !busy
+        layoutButton?.isEnabled = snapshot != nil && !busy
     }
     private func setBusy(_ value: Bool, message: String? = nil) {
         setActivity(.comparison, active: value)
@@ -526,6 +537,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let previous = preferences.filters
         preferences.filters = ReviewFilters(tests: testsFilter.state == .on, documentation: docsFilter.state == .on, generated: noiseFilter.state == .on)
         do { try savePreferences() } catch { preferences.filters = previous; updateFilters(); showError(error, title: "Could not save filters"); return }
+        Style.animateStateChange(sidebar.enclosingScrollView?.contentView)
         let path = files.indices.contains(focused) ? files[focused].path : nil
         diff.expanded = Self.expansionAfterFilterChange(files: files, expanded: diff.expanded,
                                                       from: previous, to: preferences.filters)
@@ -560,6 +572,27 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             showError(error, title: "Could not save wrapping preference")
         }
     }
+    @objc private func layoutChanged() {
+        guard !busy, settleDraft() else { return }
+        let previous = preferences.diffLayout
+        preferences.diffLayout = previous == .split ? .unified : .split
+        do {
+            try savePreferences()
+            diff.diffLayout = preferences.diffLayout
+            updateLayoutButton()
+        } catch {
+            preferences.diffLayout = previous
+            showError(error, title: "Could not save diff layout")
+        }
+    }
+    private func updateLayoutButton() {
+        let title = preferences.diffLayout == .split ? "Unified" : "Split"
+        layoutButton?.title = title
+        layoutButton?.label = title
+        layoutButton?.paletteLabel = title
+        layoutButton?.toolTip = "Switch to \(title.lowercased()) diff"
+        layoutButton?.image = Icons.toolbarImage(preferences.diffLayout == .split ? "rectangle" : "rectangle.split.2x1")
+    }
     private func savePreferences() throws { try store?.savePreferences(preferences) }
     private func saveProgress() throws {
         if let snapshot { try store?.saveProgress(progress, identity: snapshot.identity) }
@@ -572,7 +605,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         diff.expanded.remove(file.path)
         let next = ((focused + 1)..<files.count).first { !isReviewed(files[$0]) } ?? (0..<focused).first { !isReviewed(files[$0]) }
         diff.rebuild()
-        sidebar.reloadData()
+        refreshReviewState()
         if let next { diff.navigate(to: next); focus(next) }
         else { showStatus("All files reviewed."); diff.navigate(to: focused, expand: false) }
         updateActions()
@@ -582,7 +615,16 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if reviewed { progress.reviewed[file.path] = file.fingerprint }
         else { progress.reviewed.removeValue(forKey: file.path) }
         do { try saveProgress() } catch { progress = prior; showError(error, title: "Could not save review progress") }
-        diff.redraw(); sidebar.reloadData(); updateActions()
+        diff.redraw(); refreshReviewState(); updateActions()
+    }
+    private func refreshReviewState() {
+        let visible = sidebar.rows(in: sidebar.visibleRect)
+        guard visible.location != NSNotFound else { return }
+        for row in visible.location..<NSMaxRange(visible) where sidebarIndices.indices.contains(row) {
+            guard let cell = sidebar.view(atColumn: 0, row: row, makeIfNecessary: false) as? FileCell else { continue }
+            let file = files[sidebarIndices[row]]
+            cell.configure(file: file, reviewed: isReviewed(file), reason: preferences.filters.skipReason(for: file))
+        }
     }
     @objc private func previousFile() { if focused > 0 { diff.navigate(to: focused - 1) } }
     @objc private func nextFile() { if focused + 1 < files.count { diff.navigate(to: focused + 1) } }
@@ -644,11 +686,26 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     @objc private func finishReview() {
         guard let snapshot, settleDraft() else { return }
+        copyConfirmation?.cancel()
+        finishButton.image = Icons.toolbarImage("copy")
         let text = ReviewExport.markdown(snapshot: snapshot, progress: progress)
         NSPasteboard.general.clearContents()
         if NSPasteboard.general.setString(text, forType: .string) {
             showStatus("Copied \(progress.comments.count) comments")
+            confirmCopy()
         } else { showError(GitError("The clipboard could not be updated. Try again or export a Markdown file."), title: "Could not copy review") }
+    }
+    private func confirmCopy() {
+        copyConfirmation?.cancel()
+        finishButton.image = Icons.toolbarImage("check")
+        finishButton.toolTip = "Review copied"
+        let dismissal = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.finishButton.image = Icons.toolbarImage("copy")
+            self.finishButton.toolTip = "Copy review"
+        }
+        copyConfirmation = dismissal
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: dismissal)
     }
     @objc private func exportReview() {
         guard let window, let snapshot, settleDraft() else { return }
@@ -716,7 +773,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     @objc private func sidebarSelected() {
         let row = sidebar.selectedRow
-        if sidebarIndices.indices.contains(row) { diff.navigate(to: sidebarIndices[row]) }
+        if sidebarIndices.indices.contains(row) { diff.navigate(to: sidebarIndices[row], animated: true) }
     }
     private func showError(_ error: Error, title: String, recovery: String? = nil, action: (() -> Void)? = nil) {
         NSLog("%@: %@", title, error.localizedDescription)
@@ -731,7 +788,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
 
 private final class FileCell: NSTableCellView {
     private let name = Style.label("", size: 12, weight: .medium)
-    private let check = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let check = AnimatedCheckbox(checkboxWithTitle: "", target: nil, action: nil)
+    private var path: String?
     var onToggle: ((Bool) -> Void)?
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -746,6 +804,8 @@ private final class FileCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     @objc private func toggle() { onToggle?(check.state == .on) }
     func configure(file: FileDiff, reviewed: Bool, reason: String?) {
+        if path == file.path, (check.state == .on) != reviewed { Style.animateStateChange(check) }
+        path = file.path
         name.stringValue = (file.path as NSString).lastPathComponent
         name.textColor = reviewed ? .secondaryLabelColor : .labelColor
         check.state = reviewed ? .on : .off
