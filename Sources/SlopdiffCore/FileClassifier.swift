@@ -1,12 +1,15 @@
 import Foundation
 
 public enum FileClassifier {
+    public static let markdownExtensions: Set<String> = ["md", "markdown", "mdown", "mkd"]
+
     public static func classify(_ path: String) -> FileCategory {
         let lower = path.lowercased()
         let parts = lower.split(separator: "/").map(String.init)
         let name = parts.last ?? lower
         let originalName = (path as NSString).lastPathComponent
         let ext = (name as NSString).pathExtension
+        if markdownExtensions.contains(ext) || ext == "mdx" { return .documentation }
         let generatedNames: Set<String> = [
             "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
             "bun.lock", "bun.lockb", "cargo.lock", "gemfile.lock", "poetry.lock", "uv.lock",
@@ -31,7 +34,7 @@ public enum FileClassifier {
             return .tests
         }
         if ["docs", "doc", "documentation"].contains(where: parts.contains) ||
-            ["md", "mdx", "rst", "adoc", "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "icns", "mp3", "mp4", "wav", "ogg", "mov", "webm", "woff", "woff2", "ttf", "otf",
+            ["rst", "adoc", "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "icns", "mp3", "mp4", "wav", "ogg", "mov", "webm", "woff", "woff2", "ttf", "otf",
              "json", "jsonc", "yaml", "yml", "toml", "ini", "conf", "config", "properties", "xml", "plist", "csv", "tsv", "env", "editorconfig"].contains(ext) ||
             [".gitignore", ".gitattributes", ".editorconfig", ".npmrc", ".nvmrc", ".env"].contains(name) ||
             ["readme", "license", "licence", "copying", "notice", "changelog", "authors"].contains(where: name.hasPrefix) {

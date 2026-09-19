@@ -96,6 +96,34 @@ public struct ReviewProgress: Codable, Sendable {
     public init(reviewed: [String: String] = [:], comments: [ReviewComment] = []) {
         self.reviewed = reviewed; self.comments = comments
     }
+    public mutating func saveComment(_ comment: ReviewComment) throws {
+        guard comment.startLine >= 1, comment.endLine >= comment.startLine else {
+            throw CommentValidationError.invalidRange
+        }
+        guard !comment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CommentValidationError.emptyText
+        }
+        if let conflict = comments.first(where: {
+            $0.id != comment.id && $0.path == comment.path && $0.side == comment.side &&
+            $0.startLine <= comment.endLine && $0.endLine >= comment.startLine
+        }) {
+            throw CommentValidationError.overlap(conflict.startLine, conflict.endLine)
+        }
+        if let index = comments.firstIndex(where: { $0.id == comment.id }) { comments[index] = comment }
+        else { comments.append(comment) }
+    }
+}
+
+public enum CommentValidationError: LocalizedError {
+    case invalidRange, emptyText
+    case overlap(Int, Int)
+    public var errorDescription: String? {
+        switch self {
+        case .invalidRange: return "Use whole line numbers: start ≥ 1, end ≥ start."
+        case .emptyText: return "Enter a comment before saving."
+        case .overlap(let start, let end): return "Lines \(start)–\(end) already have a comment. Choose a non-overlapping range or edit that comment."
+        }
+    }
 }
 
 public struct ReviewFilters: Codable, Sendable {

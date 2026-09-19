@@ -14,31 +14,36 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var loadTask: Task<Void, Never>?
     private var comparisonSheet: ComparisonSheet?
     private var commentEditor: CommentEditorController?
-    private var preview: MarkdownPreviewController?
     private let diff = DiffViewport()
     private let sidebar = NSTableView()
     private let search = NSSearchField()
-    private let status = Style.label("", size: 11, color: .secondaryLabelColor)
+    private let searchItem = NSSearchToolbarItem(itemIdentifier: .init("search"))
+    private var searchMatchingFiles: Set<Int>?
     private let spinner = NSProgressIndicator()
     private var reviewNext: NSToolbarItem!
-    private var reviewedCheck: NSToolbarItemGroup!
-    private var previewButton: NSToolbarItem!
     private var finishButton: NSToolbarItem!
     private var refreshButton: NSToolbarItem!
     private var commentsButton: NSToolbarItem!
+    private var feedbackActions: NSToolbarItemGroup!
     private var wrapButton: NSToolbarItemGroup!
     private let splitController = NSSplitViewController()
     private var toolbarItems: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     private let toolbarOrder: [NSToolbarItem.Identifier] = [
-        .init("open"), .init("recent"), .init("refresh"), .space, .init("navigation"),
-        .init("status"), .flexibleSpace, .init("reviewed"), .space, .init("wrap"), .init("preview"),
-        .init("comments"), .space, .init("reviewNext"), .space, .init("copy"), .init("export")
+        .init("sources"), .init("sidebarDivider"),
+        .init("navigation"), .space, .init("status"), .flexibleSpace,
+        .init("search"), .space, .init("wrap"), .space, .init("split"),
+        .space, .init("feedback")
+    ]
+    private let emptyToolbarOrder: [NSToolbarItem.Identifier] = [
+        .init("welcomeSources"), .init("status"), .flexibleSpace
     ]
     private let testsFilter = NSButton(checkboxWithTitle: "Tests", target: nil, action: nil)
     private let docsFilter = NSButton(checkboxWithTitle: "Documentation / non-code", target: nil, action: nil)
     private let noiseFilter = NSButton(checkboxWithTitle: "Generated / noise", target: nil, action: nil)
     private let empty = NSView()
-    private var busy = false
+    private enum Activity { case comparison, layout, search }
+    private var activities: Set<Activity> = []
+    private var busy: Bool { activities.contains(.comparison) }
     private var statusDismissal: DispatchWorkItem?
 
     init() {
@@ -49,6 +54,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         window.titleVisibility = .hidden
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .none
+        window.titlebarAppearsTransparent = true
         window.isOpaque = false
         window.backgroundColor = .clear
         window.minSize = NSSize(width: 1080, height: 680)
@@ -61,14 +67,12 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { settleDraft() }
 
     func start() {
         do {
             let args = ProcessInfo.processInfo.arguments
-            let state: URL?
-            if let i = args.firstIndex(of: "--state-directory"), args.indices.contains(i + 1) { state = URL(fileURLWithPath: args[i + 1]) }
-            else { state = nil }
-            store = try ReviewStore(directory: state)
+            store = try ReviewStore()
             preferences = try store!.loadPreferences()
             updateFilters()
             diff.softWrap = preferences.softWrap
@@ -91,8 +95,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         // A separate sidebar material creates a seam through the shared window glass.
         // Keep native source-list controls in a regular split pane instead.
         let side = NSSplitViewItem(viewController: sideController)
-        side.minimumThickness = 210; side.maximumThickness = 400
+        side.minimumThickness = 250; side.maximumThickness = 400
         side.preferredThicknessFraction = 0.19
+        side.canCollapse = true
         side.canCollapseFromWindowResize = false
         let mainController = NSViewController()
         mainController.view = buildMain()
@@ -104,95 +109,152 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         backdrop.addChild(splitController)
         let glass = NSGlassEffectView()
         glass.style = .regular
-        glass.tintColor = NSColor(name: "Slopdiff shared contrast") { appearance in
-            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return NSColor(calibratedWhite: dark ? 0.12 : 0.95, alpha: 0.20)
-        }
+        glass.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(0.30)
         glass.cornerRadius = 0
         glass.contentView = splitController.view
         backdrop.view = glass
         window.contentViewController = backdrop
-        splitController.splitView.setPosition(250, ofDividerAt: 0)
+        splitController.splitView.setPosition(290, ofDividerAt: 0)
 
-        func item(_ id: String, _ title: String, _ icon: String, _ action: Selector, text: Bool = false) -> NSToolbarItem {
+        func toolbarIcon(_ name: String) -> NSImage? {
+            guard let image = (Icons.image(name) ?? NSImage(systemSymbolName: name, accessibilityDescription: nil))?.copy() as? NSImage else { return nil }
+            image.size = NSSize(width: 20, height: 20)
+            return image
+        }
+        func item(_ id: String, _ title: String, _ icon: String, _ action: Selector?, text: Bool = false) -> NSToolbarItem {
             let identifier = NSToolbarItem.Identifier(id)
             let item = NSToolbarItem(itemIdentifier: identifier)
             item.label = title; item.paletteLabel = title; item.toolTip = title
-            let button = NSButton(title: text ? title : "", target: self, action: action)
-            button.bezelStyle = .glass
-            button.controlSize = .large
-            button.font = .systemFont(ofSize: 13, weight: .medium)
-            button.image = Icons.image(icon)
-            button.imagePosition = text ? .imageLeading : .imageOnly
-            button.toolTip = title
-            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: ceil(button.intrinsicContentSize.width + 8)).isActive = true
-            item.view = button
+            item.image = toolbarIcon(icon)
+            if text { item.title = title }
+            item.isBordered = true
             item.target = self; item.action = action
             item.autovalidates = false
             toolbarItems[identifier] = item
             return item
         }
-        _ = item("open", "Open comparison", "folder-open", #selector(openComparison))
-        _ = item("recent", "Recent comparisons", "chevron-down", #selector(showRecent(_:)))
-        refreshButton = item("refresh", "Refresh · ⌘R", "rotate-cw", #selector(refresh))
-        for id in ["open", "recent", "refresh"] { toolbarItems[.init(id)]?.isNavigational = true }
+        let sources = NSToolbarItemGroup(itemIdentifier: .init("sources"),
+            images: [toolbarIcon("folder-open")!, toolbarIcon("rotate-cw")!, toolbarIcon("clock.arrow.circlepath")!],
+            selectionMode: .momentary, labels: ["Open comparison", "Refresh · ⌘R", "Recent comparisons"],
+            target: self, action: #selector(sourceAction(_:)))
+        sources.isBordered = true
+        sources.autovalidates = false
+        refreshButton = sources.subitems[1]
+        toolbarItems[sources.itemIdentifier] = sources
+        let welcomeSources = NSToolbarItemGroup(itemIdentifier: .init("welcomeSources"),
+            images: [toolbarIcon("folder-open")!, toolbarIcon("clock.arrow.circlepath")!],
+            selectionMode: .momentary, labels: ["Open comparison", "Recent comparisons"],
+            target: self, action: #selector(welcomeSourceAction(_:)))
+        welcomeSources.isBordered = true
+        welcomeSources.autovalidates = false
+        toolbarItems[welcomeSources.itemIdentifier] = welcomeSources
+        let divider = NSTrackingSeparatorToolbarItem(identifier: .init("sidebarDivider"), splitView: splitController.splitView, dividerIndex: 0)
+        toolbarItems[divider.itemIdentifier] = divider
         let navigation = NSToolbarItemGroup(itemIdentifier: .init("navigation"),
-            images: [Icons.image("arrow-up")!, Icons.image("arrow-down")!], selectionMode: .momentary,
-            labels: ["Previous file", "Next file"], target: self, action: #selector(navigateToolbar(_:)))
-        navigation.isBordered = true
-        (navigation.view as? NSSegmentedControl)?.controlSize = .large
-        navigation.view?.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        toolbarItems[navigation.itemIdentifier] = navigation
-        reviewedCheck = NSToolbarItemGroup(itemIdentifier: .init("reviewed"), images: [Icons.image("check")!],
-            selectionMode: .selectAny, labels: ["Reviewed"], target: self, action: #selector(toggleReviewed))
-        reviewedCheck.isBordered = true; reviewedCheck.autovalidates = false; reviewedCheck.toolTip = "Toggle reviewed"
-        (reviewedCheck.view as? NSSegmentedControl)?.controlSize = .large
-        reviewedCheck.view?.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        toolbarItems[reviewedCheck.itemIdentifier] = reviewedCheck
+            images: [toolbarIcon("arrow-down")!, toolbarIcon("arrow-up")!, toolbarIcon("check")!], selectionMode: .momentary,
+            labels: ["Next file", "Previous file", "Review & next"], target: self, action: #selector(navigateToolbar(_:)))
+        reviewNext = navigation
+        reviewNext.visibilityPriority = .high
         wrapButton = NSToolbarItemGroup(itemIdentifier: .init("wrap"), titles: ["Wrap"],
             selectionMode: .selectAny, labels: ["Soft wrap"], target: self, action: #selector(wrapChanged))
-        wrapButton.isBordered = true; wrapButton.toolTip = "Soft wrap · remembered across launches"
-        (wrapButton.view as? NSSegmentedControl)?.controlSize = .large
-        wrapButton.view?.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        toolbarItems[wrapButton.itemIdentifier] = wrapButton
-        previewButton = item("preview", "Markdown preview", "file-text", #selector(showPreview))
-        commentsButton = item("comments", "Comments", "message-square", #selector(showComments(_:)))
-        reviewNext = item("reviewNext", "Review & next", "check-check", #selector(markAndNext), text: true)
-        reviewNext.visibilityPriority = .high
-        finishButton = item("copy", "Copy review", "copy", #selector(finishReview), text: true)
-        finishButton.visibilityPriority = .high
-        finishButton.style = .prominent
-        (finishButton.view as? NSButton)?.contentTintColor = .controlAccentColor
-        _ = item("export", "Export Markdown", "download", #selector(exportReview))
+        wrapButton.subitems.first?.image = toolbarIcon("arrow.turn.down.left")
+        for group in [navigation, wrapButton!] {
+            group.isBordered = true
+            group.autovalidates = false
+            toolbarItems[group.itemIdentifier] = group
+        }
+        let split = item("split", "Split", "rectangle.split.2x1", nil, text: true)
+        split.isEnabled = false
+        split.toolTip = "Split · not available yet"
+        feedbackActions = NSToolbarItemGroup(itemIdentifier: .init("feedback"),
+            images: [toolbarIcon("message-square")!, toolbarIcon("copy")!, toolbarIcon("square.and.arrow.down")!],
+            selectionMode: .momentary, labels: ["Comments", "Copy review", "Export Markdown"],
+            target: self, action: #selector(feedbackAction(_:)))
+        feedbackActions.isBordered = true
+        feedbackActions.autovalidates = false
+        feedbackActions.visibilityPriority = .high
+        commentsButton = feedbackActions.subitems[0]
+        finishButton = feedbackActions.subitems[1]
+        toolbarItems[feedbackActions.itemIdentifier] = feedbackActions
 
         spinner.style = .spinning; spinner.controlSize = .small; spinner.isDisplayedWhenStopped = false
         let context = NSToolbarItem(itemIdentifier: .init("status"))
-        let contextView = Style.stack([spinner, status], spacing: 8)
-        contextView.widthAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
-        status.isHidden = true
-        context.view = contextView; context.label = "Comparison"; context.visibilityPriority = .low
-        context.isHidden = true
+        context.view = spinner; context.label = "Loading"; context.visibilityPriority = .high
+        context.isBordered = false
         toolbarItems[context.itemIdentifier] = context
+        search.placeholderString = "Search review…"
+        search.delegate = self
+        search.sendsSearchStringImmediately = true
+        searchItem.searchField = search
+        searchItem.preferredWidthForSearchField = 230
+        searchItem.label = "Search review"
+        toolbarItems[searchItem.itemIdentifier] = searchItem
         let toolbar = NSToolbar(identifier: "Slopdiff.review")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         installReviewMenu()
+        updateComparisonPresentation()
         updateActions()
     }
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarOrder }
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarOrder }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        snapshot == nil ? emptyToolbarOrder : toolbarOrder
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarOrder + [.init("welcomeSources")]
+    }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? { toolbarItems[itemIdentifier] }
+    private func updateComparisonPresentation() {
+        let hasComparison = snapshot != nil
+        splitController.splitViewItems.first?.isCollapsed = !hasComparison
+        empty.isHidden = hasComparison
+        diff.isHidden = !hasComparison
+        guard let toolbar = window?.toolbar else { return }
+        let order = hasComparison ? toolbarOrder : emptyToolbarOrder
+        guard toolbar.items.map(\.itemIdentifier) != order else { return }
+        for index in toolbar.items.indices.reversed() { toolbar.removeItem(at: index) }
+        for (index, identifier) in order.enumerated() {
+            toolbar.insertItem(withItemIdentifier: identifier, at: index)
+        }
+    }
+    @objc private func welcomeSourceAction(_ sender: NSToolbarItemGroup) {
+        switch sender.selectedIndex {
+        case 0: openComparison()
+        case 1: showRecent(sender)
+        default: break
+        }
+    }
     @objc private func navigateToolbar(_ sender: NSToolbarItemGroup) {
-        if sender.selectedIndex == 0 { previousFile() } else { nextFile() }
+        switch sender.selectedIndex {
+        case 0: nextFile()
+        case 1: previousFile()
+        case 2: markAndNext()
+        default: break
+        }
+    }
+    @objc private func feedbackAction(_ sender: NSToolbarItemGroup) {
+        switch sender.selectedIndex {
+        case 0: showComments(sender)
+        case 1: finishReview()
+        case 2: exportReview()
+        default: break
+        }
+    }
+    @objc private func sourceAction(_ sender: NSToolbarItemGroup) {
+        switch sender.selectedIndex {
+        case 0: openComparison()
+        case 1: refresh()
+        case 2: showRecent(sender)
+        default: break
+        }
     }
     private func installReviewMenu() {
         let menu = NSMenu(title: "Review")
         let entries: [(String, Selector, String)] = [
             ("Open comparison…", #selector(openComparison), "o"),
             ("Refresh", #selector(refresh), "r"),
+            ("Find in review", #selector(findInReview), "f"),
             ("Review & next", #selector(markAndNext), "j"),
             ("Comment on selection", #selector(commentOnSelection), "l"),
             ("Copy review", #selector(finishReview), "\r"),
@@ -211,13 +273,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     private func buildSidebar() -> NSView {
         let content = NSView()
-        search.placeholderString = "Filter files…"
-        search.delegate = self
-        search.sendsSearchStringImmediately = true
-        let header = Style.stack([search], orientation: .vertical, spacing: 0)
-        search.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
-        header.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(header)
         sidebar.headerView = nil; sidebar.rowHeight = 27; sidebar.intercellSpacing = .zero
         sidebar.style = .sourceList
         sidebar.backgroundColor = .clear
@@ -233,10 +288,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         filterContent.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(filterContent)
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            header.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            header.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 8),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            scroll.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 6),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -6),
             scroll.bottomAnchor.constraint(equalTo: filterContent.topAnchor),
@@ -268,10 +320,10 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         ])
         empty.translatesAutoresizingMaskIntoConstraints = false; main.addSubview(empty)
         NSLayoutConstraint.activate([
-            empty.leadingAnchor.constraint(equalTo: diff.leadingAnchor),
-            empty.trailingAnchor.constraint(equalTo: diff.trailingAnchor),
-            empty.topAnchor.constraint(equalTo: diff.topAnchor),
-            empty.bottomAnchor.constraint(equalTo: diff.bottomAnchor)
+            empty.leadingAnchor.constraint(equalTo: main.leadingAnchor),
+            empty.trailingAnchor.constraint(equalTo: main.trailingAnchor),
+            empty.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),
+            empty.bottomAnchor.constraint(equalTo: main.bottomAnchor)
         ])
         let logo = NSImageView(image: Icons.image("git-compare-arrows") ?? NSImage())
         logo.contentTintColor = .controlAccentColor
@@ -279,15 +331,11 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         logo.widthAnchor.constraint(equalToConstant: 40).isActive = true
         logo.heightAnchor.constraint(equalToConstant: 40).isActive = true
         let start = Style.button("Open a comparison", icon: "folder-open", target: self, action: #selector(openComparison))
-        let welcome = Style.stack([
-            logo, Style.label("Less noise. More review.", size: 26, weight: .semibold),
-            Style.label("A pull request, two branches, or everything your agent just changed.", size: 13, color: .secondaryLabelColor),
-            start, Style.label("Local comments. Copy them back to your agent.", size: 11, color: .tertiaryLabelColor)
-        ], orientation: .vertical, spacing: 18)
+        let welcome = Style.stack([logo, start], orientation: .vertical, spacing: 18)
         welcome.alignment = .centerX; welcome.translatesAutoresizingMaskIntoConstraints = false; empty.addSubview(welcome)
         NSLayoutConstraint.activate([
             welcome.centerXAnchor.constraint(equalTo: empty.centerXAnchor),
-            welcome.centerYAnchor.constraint(equalTo: empty.centerYAnchor, constant: -30)
+            welcome.centerYAnchor.constraint(equalTo: empty.centerYAnchor)
         ])
         return main
     }
@@ -296,10 +344,22 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         diff.commentCount = { [weak self] file in self?.progress.comments.filter { $0.path == file.path }.count ?? 0 }
         diff.onFocus = { [weak self] in self?.focus($0) }
         diff.onComment = { [weak self] in self?.editComment(selection: $0) }
-        diff.onHighlightError = { [weak self] error in self?.showStatus(error.localizedDescription); NSLog("%@", error.localizedDescription) }
+        diff.onSearchResults = { [weak self] indices, count in
+            guard let self else { return }
+            self.searchMatchingFiles = self.search.stringValue.isEmpty ? nil : Set(indices)
+            self.searchItem.badge = self.search.stringValue.isEmpty ? nil : .count(count)
+            self.rebuildSidebar()
+        }
+        diff.onSearchBusy = { [weak self] searching in
+            self?.setActivity(.search, active: searching)
+        }
+        diff.commentRange = { [weak self] path, side, number in
+            self?.progress.comments.first { $0.path == path && $0.side == side && ($0.startLine...$0.endLine).contains(number) }
+                .map { $0.startLine...$0.endLine }
+        }
+        diff.onHighlightError = { [weak self] error in self?.showError(error, title: "Could not highlight code") }
         diff.onLayoutBusy = { [weak self] busy in
-            if busy { self?.showStatus("Laying out wrapped lines…"); self?.spinner.startAnimation(nil) }
-            else if self?.busy == false { self?.spinner.stopAnimation(nil) }
+            self?.setActivity(.layout, active: busy)
         }
     }
     @objc private func openComparison() {
@@ -358,16 +418,28 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                     let snapshot = try GitRepository(path: request.repository).load(request)
                     let progress = try store.loadProgress(identity: snapshot.identity)
                     let presentation = Dictionary(uniqueKeysWithValues: snapshot.files.map { ($0.path, DiffPresentation.rows(for: $0)) })
-                    return (snapshot, progress, presentation)
+                    let git = GitRepository(path: request.repository)
+                    var markdown: [String: MarkdownFileContent] = [:]
+                    for file in snapshot.files where RenderedMarkdown.accepts(file.path) && !file.isBinary {
+                        do {
+                            markdown[file.path] = try MarkdownFileContent(old: git.content(snapshot: snapshot, file: file, side: .old),
+                                                                          new: git.content(snapshot: snapshot, file: file, side: .new))
+                        } catch {
+                            markdown[file.path] = MarkdownFileContent(old: nil, new: nil, error: error.localizedDescription)
+                        }
+                    }
+                    return (snapshot, progress, presentation, markdown)
                 }.value
                 guard let self else { return }
                 self.snapshot = result.0; self.progress = result.1; self.presentations = result.2
                 self.sortFiles()
                 self.diff.expanded = Set(self.files.filter { self.preferences.filters.skipReason(for: $0) == nil && !self.isReviewed($0) }.map(\.path))
                 self.diff.filters = self.preferences.filters
+                self.diff.markdownContent = result.3
+                self.searchMatchingFiles = nil
                 self.diff.setFiles(self.files, presentations: self.presentations)
                 self.rebuildSidebar()
-                self.empty.isHidden = true
+                self.updateComparisonPresentation()
                 self.window?.title = "Slopdiff — \(result.0.title)"
                 self.preferences.recentComparisons.removeAll { $0 == request || ($0.pullRequestURL != nil && $0.pullRequestURL == request.pullRequestURL) }
                 self.preferences.recentComparisons.insert(request, at: 0)
@@ -380,7 +452,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 let index = previousPath.flatMap { path in self.files.firstIndex { $0.path == path } } ?? 0
                 if !self.files.isEmpty { self.diff.navigate(to: index, expand: false); self.focus(index) }
                 self.updateActions()
-                self.performVerificationIfRequested()
             } catch {
                 guard let self else { return }
                 self.setBusy(false)
@@ -418,32 +489,29 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private func updateActions() {
         let hasFile = files.indices.contains(focused)
         reviewNext?.isEnabled = hasFile && !busy
-        reviewedCheck?.isEnabled = hasFile && !busy && preferences.filters.skipReason(for: files[focused]) == nil
-        reviewedCheck?.setSelected(hasFile && isReviewed(files[focused]), at: 0)
         finishButton?.isEnabled = snapshot != nil && !busy
+        feedbackActions?.subitems[2].isEnabled = snapshot != nil && !busy
         refreshButton?.isEnabled = snapshot != nil && !busy
-        previewButton?.isEnabled = hasFile && ["md", "markdown", "mdown"].contains((files[focused].path as NSString).pathExtension.lowercased()) && !busy
         commentsButton?.toolTip = "\(progress.comments.count) comments"
         commentsButton?.isEnabled = !progress.comments.isEmpty && !busy
     }
     private func setBusy(_ value: Bool, message: String? = nil) {
-        busy = value
+        setActivity(.comparison, active: value)
         statusDismissal?.cancel()
-        status.isHidden = !value
-        toolbarItems[.init("status")]?.isHidden = !value
-        if value { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-        if let message { status.stringValue = message }
+        spinner.toolTip = message
         updateActions()
+    }
+    private func setActivity(_ activity: Activity, active: Bool) {
+        if active { activities.insert(activity) } else { activities.remove(activity) }
+        if activities.isEmpty { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
     }
     private func showStatus(_ message: String) {
         statusDismissal?.cancel()
-        status.stringValue = message
-        status.isHidden = false
-        toolbarItems[.init("status")]?.isHidden = false
+        NSLog("%@", message)
+        finishButton?.toolTip = message
         let dismissal = DispatchWorkItem { [weak self] in
             if self?.busy == false {
-                self?.status.isHidden = true
-                self?.toolbarItems[.init("status")]?.isHidden = true
+                self?.finishButton?.toolTip = "Copy review"
             }
         }
         statusDismissal = dismissal
@@ -459,16 +527,28 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         preferences.filters = ReviewFilters(tests: testsFilter.state == .on, documentation: docsFilter.state == .on, generated: noiseFilter.state == .on)
         do { try savePreferences() } catch { preferences.filters = previous; updateFilters(); showError(error, title: "Could not save filters"); return }
         let path = files.indices.contains(focused) ? files[focused].path : nil
-        for file in files {
-            if preferences.filters.skipReason(for: file) != nil { diff.expanded.remove(file.path) }
-            else if previous.skipReason(for: file) != nil { diff.expanded.insert(file.path) }
-        }
+        diff.expanded = Self.expansionAfterFilterChange(files: files, expanded: diff.expanded,
+                                                      from: previous, to: preferences.filters)
         sortFiles(); diff.files = files; diff.filters = preferences.filters
+        searchMatchingFiles = nil
+        diff.search(query: search.stringValue)
         diff.selection = nil
         diff.rebuild()
         rebuildSidebar()
         if let path, let index = files.firstIndex(where: { $0.path == path }) { diff.navigate(to: index, expand: false) }
         updateActions()
+    }
+    static func expansionAfterFilterChange(files: [FileDiff], expanded: Set<String>,
+                                           from previous: ReviewFilters, to current: ReviewFilters) -> Set<String> {
+        var result = expanded
+        for file in files {
+            let wasSkipped = previous.skipReason(for: file) != nil
+            let isSkipped = current.skipReason(for: file) != nil
+            guard wasSkipped != isSkipped else { continue }
+            if isSkipped { result.remove(file.path) }
+            else { result.insert(file.path) }
+        }
+        return result
     }
     @objc private func wrapChanged() {
         let previous = preferences.softWrap
@@ -497,10 +577,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         else { showStatus("All files reviewed."); diff.navigate(to: focused, expand: false) }
         updateActions()
     }
-    @objc private func toggleReviewed() {
-        guard files.indices.contains(focused) else { return }
-        setReviewed(files[focused], reviewed: reviewedCheck.isSelected(at: 0))
-    }
     private func setReviewed(_ file: FileDiff, reviewed: Bool) {
         let prior = progress
         if reviewed { progress.reviewed[file.path] = file.fingerprint }
@@ -517,19 +593,24 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private func editComment(selection: LineSelection) {
         guard files.indices.contains(selection.file) else { return }
         let file = files[selection.file]
+        if let comment = progress.comments.first(where: {
+            $0.path == file.path && $0.side == selection.side &&
+            $0.startLine <= selection.end && $0.endLine >= selection.start
+        }) {
+            presentComment(comment, isNew: false)
+            return
+        }
         presentComment(ReviewComment(path: file.path, side: selection.side, startLine: selection.start, endLine: selection.end, text: "", fingerprint: file.fingerprint), isNew: true)
     }
     private func presentComment(_ comment: ReviewComment, isNew: Bool) {
         guard let window, window.attachedSheet == nil else { return }
         if let commentEditor, !commentEditor.dismissIfUnchanged() { commentEditor.focus(); return }
         commentEditor = CommentEditorController(comment: comment, isNew: isNew, onSave: { [weak self] comment in
-            try self?.changeComments {
-                if let index = $0.firstIndex(where: { $0.id == comment.id }) { $0[index] = comment } else { $0.append(comment) }
-            }
-        }, onDelete: isNew ? nil : { [weak self] in try self?.changeComments { $0.removeAll { $0.id == comment.id } } })
+            try self?.changeComments { try $0.saveComment(comment) }
+        }, onDelete: isNew ? nil : { [weak self] in try self?.changeComments { $0.comments.removeAll { $0.id == comment.id } } })
         commentEditor?.present(relativeTo: diff.selectionAnchor ?? NSRect(x: diff.bounds.midX, y: diff.bounds.maxY - 60, width: 1, height: 1), of: diff)
     }
-    private func settleDraft() -> Bool {
+    func settleDraft() -> Bool {
         guard let commentEditor else { return true }
         guard commentEditor.dismissIfUnchanged() else {
             commentEditor.focus()
@@ -538,10 +619,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         }
         return true
     }
-    private func changeComments(_ change: (inout [ReviewComment]) -> Void) throws {
+    private func changeComments(_ change: (inout ReviewProgress) throws -> Void) throws {
         let prior = progress
-        change(&progress.comments)
-        do { try saveProgress() }
+        do { try change(&progress); try saveProgress() }
         catch { progress = prior; throw error }
         diff.redraw(); sidebar.reloadData(); updateActions()
     }
@@ -584,23 +664,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             } catch { self.showError(error, title: "Could not export review") }
         }
     }
-    @objc private func showPreview() {
-        guard let snapshot, files.indices.contains(focused), !busy else { return }
-        let file = files[focused]
-        setBusy(true, message: "Loading Markdown preview…")
-        Task { [weak self] in
-            do {
-                let texts = try await Task.detached(priority: .userInitiated) {
-                    let git = GitRepository(path: snapshot.request.repository)
-                    return try (git.content(snapshot: snapshot, file: file, side: .old), git.content(snapshot: snapshot, file: file, side: .new))
-                }.value
-                guard let self else { return }
-                self.preview = MarkdownPreviewController(path: file.path, old: texts.0, new: texts.1)
-                self.preview?.showWindow(nil)
-                self.setBusy(false)
-            } catch { self?.setBusy(false); self?.showError(error, title: "Could not preview Markdown") }
-        }
-    }
     @objc private func showRecent(_ sender: Any?) {
         let menu = NSMenu()
         for (index, request) in preferences.recentComparisons.enumerated() {
@@ -627,10 +690,18 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let request = preferences.recentComparisons[sender.tag]
         if let url = request.pullRequestURL { openPR(url) } else { load(request) }
     }
-    func controlTextDidChange(_ obj: Notification) { rebuildSidebar() }
+    @objc private func findInReview() { searchItem.beginSearchInteraction() }
+    func controlTextDidChange(_ obj: Notification) {
+        guard obj.object as? NSSearchField === search else { return }
+        diff.search(query: search.stringValue)
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === search, commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        diff.nextSearchMatch(backwards: NSApp.currentEvent?.modifierFlags.contains(.shift) == true)
+        return true
+    }
     private func rebuildSidebar() {
-        let query = search.stringValue
-        sidebarIndices = files.indices.filter { query.isEmpty || files[$0].path.localizedCaseInsensitiveContains(query) }
+        sidebarIndices = files.indices.filter { searchMatchingFiles?.contains($0) ?? true }
         sidebar.reloadData()
     }
     func numberOfRows(in tableView: NSTableView) -> Int { sidebarIndices.count }
@@ -648,7 +719,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if sidebarIndices.indices.contains(row) { diff.navigate(to: sidebarIndices[row]) }
     }
     private func showError(_ error: Error, title: String, recovery: String? = nil, action: (() -> Void)? = nil) {
-        status.stringValue = "\(title): \(error.localizedDescription)"
         NSLog("%@: %@", title, error.localizedDescription)
         guard let window else { return }
         let alert = NSAlert(); alert.alertStyle = .warning
@@ -656,22 +726,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         alert.addButton(withTitle: "OK")
         if let recovery { alert.addButton(withTitle: recovery) }
         alert.beginSheetModal(for: window) { response in if response == .alertSecondButtonReturn { action?() } }
-    }
-    private func performVerificationIfRequested() {
-        // Opt-in local harness: uses the real window and scroll surface, never user state by default.
-        let args = ProcessInfo.processInfo.arguments
-        guard let i = args.firstIndex(of: "--capture"), args.indices.contains(i + 1) else { return }
-        let path = args[i + 1]
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, let view = self.window?.contentView,
-                  let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-            NSLog("Slopdiff capture window=%d frame=%@", self.window?.windowNumber ?? 0, NSStringFromRect(self.window?.frame ?? .zero))
-            view.cacheDisplay(in: view.bounds, to: bitmap)
-            if let data = bitmap.representation(using: .png, properties: [:]) {
-                do { try data.write(to: URL(fileURLWithPath: path), options: .atomic) }
-                catch { self.showError(error, title: "Could not capture verification image") }
-            }
-        }
     }
 }
 

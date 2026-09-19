@@ -44,19 +44,24 @@ enum Style {
 }
 
 enum Icons {
+    private struct TintKey: Hashable {
+        let name: String
+        let dark: Bool
+        let color: NSColor
+    }
     private static var cache: [String: NSImage] = [:]
-    static func draw(_ name: String, in rect: NSRect) {
-        let key = "tinted-\(name)-\(Style.dark)"
-        if cache[key] == nil, let original = image(name) {
-            let tint = NSColor.secondaryLabelColor
-            cache[key] = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { bounds in
+    private static var tinted: [TintKey: NSImage] = [:]
+    static func draw(_ name: String, in rect: NSRect, color: NSColor = .secondaryLabelColor) {
+        let key = TintKey(name: name, dark: Style.dark, color: color)
+        if tinted[key] == nil, let original = image(name) {
+            tinted[key] = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { bounds in
                 original.draw(in: bounds)
-                tint.setFill()
+                color.setFill()
                 bounds.fill(using: .sourceAtop)
                 return true
             }
         }
-        cache[key]?.draw(in: rect)
+        tinted[key]?.draw(in: rect)
     }
     static func image(_ name: String) -> NSImage? {
         if let value = cache[name] { return value }
@@ -78,6 +83,8 @@ final class FadingScrollView: NSScrollView {
     private let fade = CAGradientLayer()
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        scrollerStyle = .overlay
+        autohidesScrollers = true
         wantsLayer = true
         fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
         fade.startPoint = CGPoint(x: 0.5, y: 0)

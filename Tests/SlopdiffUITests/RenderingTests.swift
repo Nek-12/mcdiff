@@ -95,6 +95,26 @@ final class RenderingTests: XCTestCase {
     }
 
     @MainActor
+    func testCommentHitTestingRejectsEmptyHalfAndTrailingSpace() {
+        _ = NSApplication.shared
+        let viewport = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
+        let file = FileDiff(path: "Main.kt", hunks: [DiffHunk(header: "", lines: [
+            DiffLine(kind: .addition, text: "val x = 1", oldNumber: nil, newNumber: 1)
+        ])], fingerprint: "one")
+        viewport.expanded = [file.path]
+        viewport.setFiles([file], presentations: [file.path: DiffPresentation.rows(for: file)])
+        viewport.layoutSubtreeIfNeeded()
+        let y = viewport.table.rect(ofRow: 1).minY + 8
+        let half = viewport.table.bounds.width / 2
+        XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: 80, y: y)))
+        XCTAssertTrue(viewport.hitsCode(row: 1, point: NSPoint(x: half + 65, y: y)))
+        XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: half + 300, y: y)))
+        XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: half + 10, y: y)))
+        viewport.commentRange = { _, side, line in side == .new && line == 1 ? 1...1 : nil }
+        XCTAssertTrue(viewport.hitsCode(row: 1, point: NSPoint(x: half + 10, y: y)))
+    }
+
+    @MainActor
     func testSelectingRangeOpensCommentOnlyAfterGestureFinishes() {
         _ = NSApplication.shared
         let viewport = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))

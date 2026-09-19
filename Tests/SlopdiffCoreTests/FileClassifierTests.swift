@@ -2,6 +2,34 @@ import XCTest
 @testable import SlopdiffCore
 
 final class FileClassifierTests: XCTestCase {
+    func testMarkdownIsControlledByDocumentationFilterRegardlessOfDirectory() {
+        let testsOnly = ReviewFilters(tests: true, documentation: false, generated: false)
+        let noiseOnly = ReviewFilters(tests: false, documentation: false, generated: true)
+        let documentationOnly = ReviewFilters(tests: false, documentation: true, generated: false)
+        for directory in ["docs/dev/specs", "tests/fixtures", "generated", "node_modules/package", "src"] {
+            for ext in ["md", "markdown", "mdown", "mkd", "mdx", "MD"] {
+                let path = "\(directory)/workflow-orchestration.\(ext)"
+                let category = FileClassifier.classify(path)
+                XCTAssertEqual(category, .documentation, path)
+                let file = FileDiff(path: path, status: "A", hunks: [
+                    DiffHunk(header: "", lines: [DiffLine(kind: .addition, text: "# Plan", oldNumber: nil, newNumber: 1)])
+                ], fingerprint: path, category: category)
+                XCTAssertNil(testsOnly.skipReason(for: file), path)
+                XCTAssertNil(noiseOnly.skipReason(for: file), path)
+                XCTAssertNotNil(documentationOnly.skipReason(for: file), path)
+            }
+        }
+    }
+
+    func testNonMarkdownKeepsExistingDirectoryPrecedence() {
+        for path in ["tests/fixtures/input.json", "docs/dev/specs/example.swift", "tests/notes.rst"] {
+            XCTAssertEqual(FileClassifier.classify(path), .tests, path)
+        }
+        for path in ["generated/settings.json", "generated/tests/ExampleTests.swift", "node_modules/package/guide.rst"] {
+            XCTAssertEqual(FileClassifier.classify(path), .generated, path)
+        }
+    }
+
     func testConventions() {
         for path in ["src/test/kotlin/Thing.kt", "src/commonTest/Thing.kt", "tests/test_x.py", "foo_test.go", "ThingTests.swift", "x.spec.ts", "__tests__/x.js"] {
             XCTAssertEqual(FileClassifier.classify(path), .tests, path)

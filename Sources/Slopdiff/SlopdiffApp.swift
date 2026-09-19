@@ -38,4 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller?.start()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        controller?.settleDraft() == false ? .terminateCancel : .terminateNow
+    }
 }

@@ -7,6 +7,8 @@ final class ComparisonSheet: NSWindowController {
     private let repositoryField = NSTextField()
     private let baseField = NSComboBox()
     private let targetField = NSPopUpButton()
+    private let revisionField = NSTextField()
+    private let revisionItem = NSMenuItem(title: "Revision…", action: nil, keyEquivalent: "")
     private let mergeBase = NSButton(checkboxWithTitle: "Compare from common ancestor (changes since branching)", target: nil, action: nil)
     private let descriptionField = Style.label("", size: 11, color: .secondaryLabelColor)
     private let prContent = NSView()
@@ -59,8 +61,13 @@ final class ComparisonSheet: NSWindowController {
         baseField.usesDataSource = false; baseField.completes = true; baseField.stringValue = recent?.base ?? "main"
         targetField.addItem(withTitle: "Working tree")
         if let target = recent?.target { targetField.addItem(withTitle: target); targetField.lastItem?.representedObject = target; targetField.selectItem(at: 1) }
+        targetField.menu?.addItem(revisionItem)
+        targetField.target = self; targetField.action = #selector(targetChanged)
+        revisionField.placeholderString = "Tag, commit, or ref"
+        revisionField.isHidden = true
         targetField.toolTip = "Working tree includes every committed, staged, unstaged and non-ignored untracked change."
-        let refs = Style.stack([baseLabel, baseField, targetLabel, targetField], spacing: 12)
+        let refs = Style.stack([baseLabel, baseField, targetLabel, targetField, revisionField], spacing: 12)
+        revisionField.widthAnchor.constraint(equalToConstant: 160).isActive = true
         mergeBase.state = (recent?.mergeBase ?? true) ? .on : .off
         let localStack = Style.stack([repoRow, refs, mergeBase], orientation: .vertical, spacing: 12)
         Style.pin(localStack, in: localContent)
@@ -98,6 +105,10 @@ final class ComparisonSheet: NSWindowController {
         prContent.isHidden = tabs.selectedSegment != 0
         localContent.isHidden = tabs.selectedSegment != 1
     }
+    @objc private func targetChanged() {
+        revisionField.isHidden = targetField.selectedItem !== revisionItem
+        if !revisionField.isHidden { window?.makeFirstResponder(revisionField) }
+    }
     @objc private func chooseFolder() {
         guard let window else { return }
         let picker = NSOpenPanel()
@@ -121,6 +132,7 @@ final class ComparisonSheet: NSWindowController {
                 guard !Task.isCancelled, let self else { return }
                 self.baseField.removeAllItems(); self.baseField.addItems(withObjectValues: result.0)
                 let selected = self.targetField.selectedItem?.representedObject as? String
+                let customRevision = self.targetField.selectedItem === self.revisionItem
                 self.targetField.removeAllItems()
                 self.targetField.addItem(withTitle: "Working tree")
                 var branches = result.0
@@ -129,7 +141,10 @@ final class ComparisonSheet: NSWindowController {
                     self.targetField.addItem(withTitle: branch)
                     self.targetField.lastItem?.representedObject = branch
                 }
+                self.targetField.menu?.addItem(self.revisionItem)
                 if !chooseDefault, let selected { self.targetField.selectItem(withTitle: selected) }
+                if !chooseDefault, customRevision { self.targetField.select(self.revisionItem) }
+                self.targetChanged()
                 if chooseDefault { self.baseField.stringValue = result.1 }
                 self.descriptionField.stringValue = ""
             } catch {
@@ -147,7 +162,12 @@ final class ComparisonSheet: NSWindowController {
         } else {
             let path = repositoryField.stringValue
             let base = baseField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let target = targetField.selectedItem?.representedObject as? String
+            let target = targetField.selectedItem === revisionItem
+                ? revisionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                : targetField.selectedItem?.representedObject as? String
+            guard target != "" else {
+                showError("Enter a tag, commit, or ref for the target revision."); return
+            }
             guard !path.isEmpty, !base.isEmpty else {
                 showError("Choose a repository and enter the revisions to compare."); return
             }

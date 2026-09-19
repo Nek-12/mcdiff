@@ -14,8 +14,8 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
     private let onDelete: (() throws -> Void)?
     private let popover = NSPopover()
     private let textView = NSTextView()
-    private let startField = NSTextField()
-    private let endField = NSTextField()
+    private let startField = LineRangeField()
+    private let endField = LineRangeField()
     private let status = NSTextField(wrappingLabelWithString: "")
     private var saveButton: NSButton!
     private var cancelButton: NSButton!
@@ -43,6 +43,8 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         startField.stringValue = String(comment.startLine)
         endField.stringValue = String(comment.endLine)
         for field in [startField, endField] {
+            field.drawsBackground = false
+            field.isBezeled = false
             field.delegate = self
             field.controlSize = .small
             field.font = .systemFont(ofSize: 11)
@@ -68,8 +70,10 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         textView.drawsBackground = false
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
         scroll.documentView = textView
 
         saveButton = Style.button("Save", target: self, action: #selector(save))
@@ -85,7 +89,7 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         buttons.addArrangedSubview(Style.spacer())
         buttons.addArrangedSubview(cancelButton)
         buttons.addArrangedSubview(saveButton)
-        for case let button as NSButton in buttons.arrangedSubviews { button.controlSize = .small }
+        for case let button as NSButton in buttons.arrangedSubviews { button.controlSize = .regular }
 
         status.font = .systemFont(ofSize: 11)
         status.maximumNumberOfLines = 2
@@ -216,6 +220,14 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         guard !finished else { return }
         finished = true
         popover.close()
+    }
+}
+
+private final class LineRangeField: NSTextField {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSColor.secondaryLabelColor.setFill()
+        NSRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
     }
 }
 
