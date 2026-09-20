@@ -1,12 +1,13 @@
 import Foundation
 
 public struct PRPage: Sendable, Equatable {
+    public static let pageSize = 30
     public let items: [PRSummary]
-    public let hasNext: Bool
+    public let totalCount: Int
 
-    public init(items: [PRSummary], hasNext: Bool) {
+    public init(items: [PRSummary], totalCount: Int) {
         self.items = items
-        self.hasNext = hasNext
+        self.totalCount = totalCount
     }
 }
 

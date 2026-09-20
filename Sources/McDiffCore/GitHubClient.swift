@@ -164,7 +164,7 @@ public actor GitHubClient {
     }
 
     public func pullRequests(query: String = "", page: Int = 1) async throws -> PRPage {
-        let pageSize = 30
+        let pageSize = PRPage.pageSize
         let searchMaximum = 1000
         guard (1...((searchMaximum + pageSize - 1) / pageSize)).contains(page) else { throw GitHubError.invalidPage }
         guard !query.contains(where: { ":\"\\".contains($0) }) else { throw GitHubError.invalidSearch }
@@ -187,8 +187,7 @@ public actor GitHubClient {
             guard let pr = try? GitHubPR.parse(item.htmlUrl), pr.url == item.htmlUrl else { throw GitHubError.invalidResponse }
             return PRSummary(pr: pr, title: item.title, createdAt: item.createdAt, isDraft: item.draft)
         }
-        return PRPage(items: results, hasNext: results.count == pageSize &&
-                      offset + results.count < min(response.totalCount, searchMaximum))
+        return PRPage(items: results, totalCount: min(response.totalCount, searchMaximum))
     }
 
     public func revisions(for pr: GitHubPR) async throws -> GitHubPRRevisions {

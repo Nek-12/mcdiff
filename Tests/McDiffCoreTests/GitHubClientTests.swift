@@ -147,13 +147,13 @@ final class GitHubClientTests: XCTestCase {
                                .json(search(items: (31...35).map(item).joined(separator: ","), total: 35))]
         let first = try await client.pullRequests()
         XCTAssertEqual(first.items.count, 30)
-        XCTAssertTrue(first.hasNext)
+        XCTAssertEqual(first.totalCount, 35)
         XCTAssertTrue(first.items[0].isDraft)
         XCTAssertEqual(first.items[0].title, "Review 1")
         XCTAssertEqual(transport.requests.count, 2)
         let second = try await client.pullRequests(page: 2)
         XCTAssertEqual(second.items.map(\.pr.number), Array(31...35))
-        XCTAssertFalse(second.hasNext)
+        XCTAssertEqual(second.totalCount, 35)
         let query = URLComponents(url: transport.requests[1].url!, resolvingAgainstBaseURL: false)?.queryItems
         XCTAssertEqual(query?.first { $0.name == "q" }?.value, "is:pr is:open author:nek-12")
         XCTAssertEqual(query?.first { $0.name == "sort" }?.value, "created")
@@ -200,24 +200,24 @@ final class GitHubClientTests: XCTestCase {
 
     func testInboxStopsAtSearchMaximumEvenWhenMoreResultsExist() async throws {
         let (client, transport, _) = makeClient(signedIn: true)
-        for (page, range, hasNext) in [(33, 961...990, true), (34, 991...1000, false)] {
+        for (page, range) in [(33, 961...990), (34, 991...1000)] {
             transport.responses = [.json(#"{"login":"nek-12"}"#),
                                    .json(search(items: range.map(item).joined(separator: ","), total: 5000))]
             let result = try await client.pullRequests(page: page)
             XCTAssertEqual(result.items.map(\.pr.number), Array(range))
-            XCTAssertEqual(result.hasNext, hasNext)
+            XCTAssertEqual(result.totalCount, 1000)
         }
         XCTAssertEqual(transport.requests.count, 4)
     }
 
-    func testInboxEmptyAndExactFullPageHaveNoNextPage() async throws {
+    func testInboxEmptyAndExactFullPageReportTheirExtent() async throws {
         for count in [0, 30] {
             let (client, transport, _) = makeClient(signedIn: true)
             transport.responses = [.json(#"{"login":"nek-12"}"#),
                                    .json(search(items: (0..<count).map { item($0 + 1) }.joined(separator: ","), total: count))]
             let result = try await client.pullRequests(query: " \n ")
             XCTAssertEqual(result.items.count, count)
-            XCTAssertFalse(result.hasNext)
+            XCTAssertEqual(result.totalCount, count)
         }
     }
 

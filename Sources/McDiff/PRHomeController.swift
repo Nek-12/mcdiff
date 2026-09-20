@@ -3,62 +3,39 @@ import McDiffCore
 
 @MainActor
 final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    typealias Loader = @Sendable (String, Int) async throws -> PRPage
+    typealias Loader = PRInbox.Loader
     let searchItem = NSSearchToolbarItem(itemIdentifier: NSToolbarItem.Identifier("pr-home-search"))
     var onOpenPR: ((String) -> Void)?
     var onResume: (() -> Void)?
     var onAuthenticationRequired: (() -> Void)?
     var resumeTitle: String? { didSet { updateResume() } }
     private var unavailableMessage: String?
+    let inbox: PRInbox
+    var isLoading: Bool { inbox.isLoading }
 
     func setUnavailable(_ message: String?, clearResults: Bool = false) {
-        loadTask?.cancel()
-        loadTask = nil
-        isLoading = false
         unavailableMessage = message
-        loadError = nil
-        if clearResults {
-            loaded = nil
-            requested = Request(query: searchQuery, page: 1)
-        }
+        if clearResults || message != nil { inbox.clear() }
         _ = view
         reloadResults()
     }
 
-    private struct Request: Equatable {
-        let query: String
-        let page: Int
-        var description: String { query.isEmpty ? "page \(page)" : "page \(page) for “\(query)”" }
-    }
-    private struct Loaded {
-        let request: Request
-        let page: PRPage
-    }
-    private var requested = Request(query: "", page: 1)
-    private var loaded: Loaded?
-    var results: [PRSummary] {
-        guard !isLoading || loaded?.request == requested else { return [] }
-        return loaded?.page.items ?? []
-    }
-    private(set) var isLoading = false
-    private var loadError: String?
-    private let loader: Loader
     private let openBrowser: (URL) -> Bool
-    private var loadTask: Task<Void, Never>?
     let table: NSTableView = PRHomeTable()
+    let scroll = NSScrollView()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let feedback = NSStackView()
     private let spinner = NSProgressIndicator()
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
-    private let previousButton = NSButton(title: "Previous", target: nil, action: nil)
-    private let nextButton = NSButton(title: "Next", target: nil, action: nil)
-    private let pageLabel = NSTextField(labelWithString: "")
     private let resumeButton = NSButton(title: "", target: nil, action: nil)
+    private var browserError: String?
 
     init(openBrowser: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, loader: @escaping Loader) {
-        self.loader = loader
+        inbox = PRInbox(loader: loader)
         self.openBrowser = openBrowser
         super.init(nibName: nil, bundle: nil)
+        inbox.onChange = { [weak self] in self?.reloadResults() }
+        inbox.onAuthenticationRequired = { [weak self] in self?.onAuthenticationRequired?() }
         searchItem.searchField.placeholderString = "Search my pull requests"
         searchItem.searchField.delegate = self
         searchItem.searchField.sendsSearchStringImmediately = true
@@ -66,14 +43,11 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     override func loadView() {
         view = NSView()
         configure(retryButton, action: #selector(retry), tooltip: "Retry loading pull requests")
-        configure(previousButton, action: #selector(previousPage), tooltip: "Load the previous page")
-        configure(nextButton, action: #selector(nextPage), tooltip: "Load the next page")
-        pageLabel.font = .systemFont(ofSize: 12)
-        pageLabel.textColor = .secondaryLabelColor
         configure(resumeButton, action: #selector(resume), tooltip: "Return to the current review")
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -85,9 +59,8 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
 
         for child in [spinner, status, retryButton] { feedback.addArrangedSubview(child) }
         feedback.alignment = .top
-        let footer = NSStackView(views: [resumeButton, NSView(), previousButton, pageLabel, nextButton])
+        let footer = NSStackView(views: [resumeButton, NSView()])
         for stack in [feedback, footer] { stack.spacing = 12 }
-        let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
@@ -108,7 +81,10 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         table.action = #selector(openClicked)
         (table as? PRHomeTable)?.onReturn = { [weak self] in self?.openSelected() }
         scroll.documentView = table
-        let content = NSStackView(views: [feedback, scroll, footer])
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        let content = NSStackView(views: [scroll, feedback, footer])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
@@ -128,103 +104,63 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         render()
     }
 
-    @objc func refresh() { startLoading(requested) }
-    @objc func retry() { startLoading(requested) }
-    @objc func previousPage() {
-        guard canNavigate, requested.page > 1 else { return }
-        startLoading(Request(query: requested.query, page: requested.page - 1))
-    }
-    @objc func nextPage() {
-        guard canNavigate, loaded?.page.hasNext == true else { return }
-        startLoading(Request(query: requested.query, page: requested.page + 1))
-    }
-
-    private var canNavigate: Bool {
-        !isLoading && unavailableMessage == nil && loaded?.request == requested
-    }
-    private var searchQuery: String {
-        searchItem.searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func startLoading(_ request: Request, debounce: Bool = false) {
-        guard !isLoading || requested != request else { return }
-        loadTask?.cancel()
-        let selectedURL = selectedPR?.pr.url
-        requested = request
+    @objc func refresh() {
         guard unavailableMessage == nil else { return }
         _ = view
-        isLoading = true
-        loadError = nil
-        reloadResults(preserving: selectedURL)
-        loadTask = Task { [weak self, loader] in
-            do {
-                if debounce { try await Task.sleep(for: .milliseconds(300)) }
-                try Task.checkCancellation()
-                let page = try await loader(request.query, request.page)
-                try Task.checkCancellation()
-                guard let self else { return }
-                self.loaded = Loaded(request: request, page: page)
-            } catch {
-                guard !Task.isCancelled else { return }
-                guard let self else { return }
-                if case GitHubError.unauthenticated = error, let onAuthenticationRequired = self.onAuthenticationRequired {
-                    self.isLoading = false
-                    self.loadTask = nil
-                    onAuthenticationRequired()
-                    return
-                }
-                self.loadError = "Couldn’t load \(request.description). Retry the request.\n\(error.localizedDescription)"
-            }
-            guard let self else { return }
-            self.isLoading = false
-            self.loadTask = nil
-            self.reloadResults(preserving: selectedURL)
-        }
+        browserError = nil
+        inbox.refresh()
     }
+    @objc func retry() { inbox.retry() }
 
     func controlTextDidChange(_ obj: Notification) {
-        guard searchQuery != requested.query else { return }
-        startLoading(Request(query: searchQuery, page: 1), debounce: true)
+        guard unavailableMessage == nil else { return }
+        browserError = nil
+        scroll.contentView.scroll(to: .zero)
+        inbox.search(searchItem.searchField.stringValue)
     }
 
-    private func reloadResults(preserving selectedURL: String? = nil) {
-        table.reloadData()
-        if let row = results.firstIndex(where: { $0.pr.url == selectedURL }) {
-            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        } else {
-            table.deselectAll(nil)
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        viewportChanged()
+    }
+
+    @objc private func viewportChanged() {
+        guard unavailableMessage == nil, inbox.count > 0 else { return }
+        let visible = table.rows(in: scroll.contentView.bounds)
+        guard visible.location != NSNotFound, visible.length > 0 else { return }
+        inbox.show(visible.location..<NSMaxRange(visible))
+    }
+
+    private func reloadResults() {
+        guard isViewLoaded else { return }
+        if table.numberOfRows != inbox.count { table.reloadData() }
+        else {
+            let visible = table.rows(in: scroll.contentView.bounds)
+            if visible.location != NSNotFound, visible.length > 0 {
+                table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<NSMaxRange(visible)),
+                                 columnIndexes: IndexSet(integer: 0))
+            }
         }
         render()
+        viewportChanged()
     }
 
     private func render() {
         if isLoading {
             spinner.startAnimation(nil)
-            status.stringValue = "Loading \(requested.description)…"
+            status.stringValue = inbox.count == 0 ? "Loading pull requests…" : ""
         } else {
             spinner.stopAnimation(nil)
             if let unavailableMessage { status.stringValue = unavailableMessage }
-            else if let loadError {
-                let previous = loaded.map { "\nShowing previously loaded \($0.request.description)." } ?? ""
-                status.stringValue = loadError + previous
-            }
-            else if loaded == nil { status.stringValue = "Refresh to load your open pull requests." }
-            else if results.isEmpty {
-                status.stringValue = requested.query.isEmpty ? "No open pull requests on this page." : "No matching pull requests on this page."
-            }
+            else if let error = browserError ?? inbox.error { status.stringValue = error }
+            else if inbox.count == 0 { status.stringValue = "No matching open pull requests." }
             else {
                 status.stringValue = ""
             }
         }
-        retryButton.isHidden = loadError == nil
-        feedback.isHidden = status.stringValue.isEmpty && !isLoading && loadError == nil
+        retryButton.isHidden = inbox.error == nil
+        feedback.isHidden = status.stringValue.isEmpty && !isLoading
         retryButton.isEnabled = !isLoading
-        previousButton.isEnabled = canNavigate && requested.page > 1
-        nextButton.isEnabled = canNavigate && loaded?.page.hasNext == true
-        pageLabel.stringValue = "Page \(isLoading ? requested.page : loaded?.request.page ?? requested.page)"
-        for control in [previousButton, pageLabel, nextButton] {
-            control.isHidden = unavailableMessage != nil || (!isLoading && loaded == nil)
-        }
     }
 
     private func configure(_ button: NSButton, action: Selector, tooltip: String) {
@@ -240,23 +176,24 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     private var selectedPR: PRSummary? {
-        results.indices.contains(table.selectedRow) ? results[table.selectedRow] : nil
+        inbox.item(at: table.selectedRow)
     }
 
     @objc func openSelected() { if let selectedPR { onOpenPR?(selectedPR.pr.url) } }
     @objc private func openClicked() {
-        guard results.indices.contains(table.clickedRow) else { return }
-        onOpenPR?(results[table.clickedRow].pr.url)
+        guard let summary = inbox.item(at: table.clickedRow) else { return }
+        onOpenPR?(summary.pr.url)
     }
     private func openOnGitHub(_ pr: GitHubPR) {
         guard let url = URL(string: pr.url) else { return }
         if !openBrowser(url) {
-            status.stringValue = "Couldn’t open GitHub. Check your default browser and try the link again."
+            browserError = "Couldn’t open GitHub. Check your default browser and try the link again."
+            render()
         }
     }
     @objc private func resume() { onResume?() }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { results.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { inbox.count }
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         PRSummaryRow()
     }
@@ -264,9 +201,9 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         let identifier = NSUserInterfaceItemIdentifier("pr-summary")
         let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? PRSummaryCell) ?? PRSummaryCell()
         cell.identifier = identifier
-        let summary = results[row]
+        let summary = inbox.item(at: row)
         cell.show(summary)
-        cell.onOpenGitHub = { [weak self] in self?.openOnGitHub(summary.pr) }
+        cell.onOpenGitHub = summary.map { summary in { [weak self] in self?.openOnGitHub(summary.pr) } }
         return cell
     }
 }
@@ -353,7 +290,14 @@ private final class PRSummaryCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func setHovered(_ hovered: Bool) { link.isHidden = !hovered }
     @objc private func openGitHub() { onOpenGitHub?() }
-    func show(_ summary: PRSummary) {
+    func show(_ summary: PRSummary?) {
+        link.isEnabled = summary != nil
+        guard let summary else {
+            title.stringValue = "Loading…"
+            metadata.stringValue = ""
+            toolTip = nil
+            return
+        }
         title.stringValue = summary.title
         let age = RelativeDateTimeFormatter().localizedString(for: summary.createdAt, relativeTo: Date())
         metadata.stringValue = "\(summary.pr.repositoryKey) #\(summary.pr.number) · Created \(age)\(summary.isDraft ? " · Draft" : "")"

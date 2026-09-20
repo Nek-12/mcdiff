@@ -41,7 +41,7 @@ final class HomeIntegrationTests: XCTestCase {
         await waitFor { window.toolbar?.items.contains { $0.label == "Sign in to GitHub" } == true }
         XCTAssertEqual(controller.screen, .home)
         XCTAssertNil(window.attachedSheet)
-        XCTAssertTrue(controller.home.results.isEmpty)
+        XCTAssertEqual(controller.home.inbox.count, 0)
         XCTAssertTrue(window.toolbar!.items.contains { $0 === controller.home.searchItem })
         XCTAssertFalse(window.toolbar!.items.contains { $0.itemIdentifier.rawValue == "navigation" })
         XCTAssertTrue(window.toolbar!.items.compactMap { $0 as? NSToolbarItemGroup }
@@ -106,7 +106,7 @@ final class HomeIntegrationTests: XCTestCase {
             title: "Private PR", createdAt: Date(), isDraft: true)])
         try? await Task.sleep(for: .milliseconds(50))
         XCTAssertFalse(home.isLoading)
-        XCTAssertTrue(home.results.isEmpty)
+        XCTAssertEqual(home.inbox.count, 0)
         XCTAssertEqual(home.table.numberOfRows, 0)
     }
 
@@ -145,7 +145,7 @@ private actor DeferredHomeLoader {
         try await withCheckedThrowingContinuation { continuation = $0 }
     }
     func finish(_ rows: [PRSummary]) {
-        continuation?.resume(returning: PRPage(items: rows, hasNext: false))
+        continuation?.resume(returning: PRPage(items: rows, totalCount: rows.count))
         continuation = nil
     }
 }
