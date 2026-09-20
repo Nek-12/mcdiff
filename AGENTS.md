@@ -18,9 +18,12 @@ McDiff is a personal macOS code-review app for agent-generated changes. Build wi
 - Follow system appearance/accent and use Monaspace Neon for source with system monospace fallback. Test the dark appearance.
 - Use the Atom One syntax palette; preserve the user's preferred coloring.
 - Use one native Liquid Glass toolbar integrated with traffic lights, a compact flat native sidebar, and a consistently tinted glass window. Use system-generated toolbar items in the regular unified style, without custom button views or forced control heights. Group related controls with spacing. File-header hairlines and subtle rounded import highlights provide separation; empty diff cells remain transparent.
-- Fresh launches show Home with My open PRs: open pull requests authored by the signed-in user across personal and organization repositories, including drafts, newest creation first. Show title, repository, number, creation age, and draft status with native search, Review, and Open on GitHub actions. Local comparisons remain available without sign-in.
+- Fresh launches show Home with open pull requests authored by the signed-in user across personal and organization repositories, including drafts, newest creation first. Show title, repository, number, creation age, and draft status with native search. Single-click a row to review; a small chain button shown on hover opens GitHub independently. Local comparisons remain available without sign-in.
 - Home hides the review sidebar and review controls. Explicit Home and Resume actions preserve the loaded review and its position; app activation preserves the current screen. Protect unsaved comments when leaving a review.
 - Use direct GitHub REST with OAuth device authorization and macOS Keychain credentials, including refresh-token rotation. Do not depend on the gh executable, embed client secrets, or store tokens in preferences. Sign-out clears account-owned Home results.
+- The account toolbar button shows a circular GitHub avatar and opens sign-in directly, including when already authenticated. Preserve existing credentials and PR results through cancelled or failed sign-in; replace credentials only after successful authorization and identity lookup.
+- Home searches GitHub across matching authored open PRs, not just loaded rows. Paginate results with Previous/Next; query changes return to page one. Do not display loaded-result counters.
+- Sign packaged builds with the Respawn Developer ID Application identity to preserve Keychain recognition across updates; do not use ad-hoc signing.
 - A single GitHub PR URL dropped on the window or pasted at window level opens through the same comparison flow as Home. Paste within text editors remains text paste. Do not monitor the clipboard or add browser extensions.
 - Package and modules are McDiff/McDiffCore; the bundle identity is dev.nek12.mcdiff. Use McDiff storage without reading or migrating Slopdiff data.
 - Keep review chrome minimal: no raw hunk headers, Original/Changed labels, repeated file categories, reviewed counter, load statistics, bottom hint bar, or comparison-title bubble. The copy action is named `Copy review`.
@@ -34,6 +37,8 @@ McDiff is a personal macOS code-review app for agent-generated changes. Build wi
 - Quit when the main window closes, including when preview windows are open.
 
 ## Engineering
+
+- Automated tests must not present visible windows, sheets, popovers, or steal focus. Keep rendering/layout tests offscreen; verify visible interaction manually.
 
 - Keep Git/process work, parsing, and syntax preparation off the main thread. Bound caches and render work. Expose loading and actionable failures.
 - Use one domain model and one persistence authority. Write persistence atomically.

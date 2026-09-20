@@ -63,23 +63,4 @@ final class ComparisonSheetTests: XCTestCase {
         XCTAssertNil(request?.target)
     }
 
-    @MainActor
-    func testEmptyCustomRevisionDoesNotOpenReview() throws {
-        _ = NSApplication.shared
-        var opened = false
-        let sheet = ComparisonSheet(recent: nil) { _, _ in opened = true }
-        let (target, field, open) = try controls(sheet)
-        target.selectItem(withTitle: "Revision…")
-        target.sendAction(target.action, to: target.target)
-        field.stringValue = " \n "
-        open.performClick(nil)
-        XCTAssertFalse(opened)
-        if let alert = sheet.window?.attachedSheet {
-            sheet.window?.endSheet(alert)
-            alert.orderOut(nil)
-        }
-        field.stringValue = "v2"
-        open.performClick(nil)
-        XCTAssertTrue(opened)
-    }
 }

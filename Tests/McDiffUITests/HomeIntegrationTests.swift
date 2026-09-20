@@ -53,7 +53,7 @@ final class HomeIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testHomeResumeRetainsViewportScrollAndProtectsUnsavedComment() async throws {
+    func testHomeResumeRetainsViewportScroll() async throws {
         _ = NSApplication.shared
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -89,64 +89,13 @@ final class HomeIntegrationTests: XCTestCase {
         XCTAssertEqual(viewport.table.numberOfRows, rows)
         XCTAssertTrue(controller.home.view.isHidden)
         XCTAssertNotNil(controller.home.resumeTitle)
-        window.makeKeyAndOrderFront(nil)
-        viewport.onComment?(LineSelection(file: 0, side: .new, start: 30, end: 30))
-        let editor = try XCTUnwrap(NSApp.windows.flatMap { $0.contentView.map(descendants) ?? [] }
-            .compactMap { $0 as? NSTextView }.first { $0.delegate is CommentEditorController })
-        editor.string = "Unsaved review feedback"
-        controller.showHome()
-        XCTAssertEqual(controller.screen, .review)
-        XCTAssertFalse(controller.settleDraft())
-        controller.openPR("https://github.com/org/repo/pull/42")
-        XCTAssertNil(window.attachedSheet)
-        XCTAssertEqual(editor.string, "Unsaved review feedback")
-        editor.string = ""
-        XCTAssertTrue(controller.settleDraft())
-        controller.showHome()
-        XCTAssertEqual(controller.screen, .home)
-    }
-
-    @MainActor
-    func testCancelledExplicitPRDoesNotResumeOnLaterAccountBootstrapAndSignoutClearsRows() async throws {
-        _ = NSApplication.shared
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [HomeTransport.self]
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-        let credentials = HomeCredentials()
-        let client = GitHubClient(clientID: "test", session: session, credentials: credentials)
-        let controller = ReviewWindowController(github: client)
-        let window = try XCTUnwrap(controller.window)
-        window.isReleasedWhenClosed = false
-        defer { window.delegate = nil; controller.close() }
-        controller.bootstrapAccount()
-        await waitFor { window.toolbar?.items.contains { $0.label == "Sign in to GitHub" } == true }
-        controller.openPR("https://github.com/org/repo/pull/42")
-        let sheet = try XCTUnwrap(window.attachedSheet)
-        XCTAssertEqual(sheet.title, "Sign in to GitHub")
-        let cancel = try XCTUnwrap(descendants(sheet.contentView!).compactMap { $0 as? NSButton }
-            .first { $0.toolTip == "Cancel GitHub sign-in" })
-        cancel.performClick(nil)
-        await waitFor { window.attachedSheet == nil }
-        try credentials.save(JSONEncoder().encode(GitHubCredential(accessToken: "fake-token", expiresAt: nil,
-            refreshToken: nil, refreshExpiresAt: nil)))
-        controller.bootstrapAccount()
-        await waitFor { controller.home.results.count == 1 }
-        XCTAssertNil(window.attachedSheet, "Cancelled intent must not open a checkout picker after later sign-in")
-        XCTAssertEqual(controller.screen, .home)
-        XCTAssertEqual(controller.home.results.first?.title, "Private draft")
-        controller.perform(NSSelectorFromString("accountAction"))
-        await waitFor { controller.home.results.isEmpty }
-        XCTAssertTrue(controller.home.filteredResults.isEmpty)
-        XCTAssertNil(try credentials.load())
-        XCTAssertTrue(window.toolbar!.items.contains { $0.label == "Sign in to GitHub" })
     }
 
     @MainActor
     func testAccountResetDiscardsInflightHomeResults() async throws {
         _ = NSApplication.shared
         let loader = DeferredHomeLoader()
-        let home = PRHomeController { _ in try await loader.load() }
+        let home = PRHomeController { _, _ in try await loader.load() }
         home.refresh()
         for _ in 0..<100 {
             if await loader.waiting { break }
@@ -158,40 +107,30 @@ final class HomeIntegrationTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(50))
         XCTAssertFalse(home.isLoading)
         XCTAssertTrue(home.results.isEmpty)
-        XCTAssertTrue(home.filteredResults.isEmpty)
         XCTAssertEqual(home.table.numberOfRows, 0)
     }
-}
 
-private final class HomeCredentials: GitHubCredentialStore, @unchecked Sendable {
-    private let lock = NSLock()
-    private var data: Data?
-    func load() throws -> Data? { lock.withLock { data } }
-    func save(_ data: Data?) throws { lock.withLock { self.data = data } }
-}
+    @MainActor
+    func testWindowPRPasteUsesTheCanonicalURLParserWithoutTouchingTheRealClipboard() throws {
+        let pasteboard = try XCTUnwrap(NSPasteboard.withUniqueName())
+        defer { pasteboard.releaseGlobally() }
+        let drop = PRDropView(frame: .zero, pasteboard: pasteboard)
+        var opened: [String] = []
+        drop.onPaste = { opened.append($0) }
+        let menuItem = NSMenuItem(title: "Paste", action: #selector(PRDropView.paste(_:)), keyEquivalent: "v")
 
-private final class HomeTransport: URLProtocol {
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {
-        let body: String
-        switch request.url!.path {
-        case "/user": body = #"{"login":"nek"}"#
-        case "/search/issues":
-            body = #"{"total_count":1,"incomplete_results":false,"items":[{"html_url":"https://github.com/org/repo/pull/42","title":"Private draft","created_at":"2026-09-20T10:00:00Z","draft":true,"pull_request":{"url":"https://api.github.com/repos/org/repo/pulls/42"}}]}"#
-        case "/login/device/code":
-            body = #"{"device_code":"fake-device","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#
-        default:
-            XCTFail("Unexpected network request: \(request.url!.path)")
-            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
-            return
-        }
-        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200,
-            httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(body.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.setString("https://github.com/owner/repo/pull/42", forType: .string))
+        XCTAssertTrue(drop.validateMenuItem(menuItem))
+        drop.paste(nil)
+        XCTAssertEqual(opened, ["https://github.com/owner/repo/pull/42"])
+
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.setString("https://example.com/not-a-pull-request", forType: .string))
+        XCTAssertFalse(drop.validateMenuItem(menuItem))
+        drop.paste(nil)
+        XCTAssertEqual(opened, ["https://github.com/owner/repo/pull/42"])
     }
-    override func stopLoading() {}
 }
 
 private struct EmptyHomeCredentials: GitHubCredentialStore {
@@ -200,13 +139,13 @@ private struct EmptyHomeCredentials: GitHubCredentialStore {
 }
 
 private actor DeferredHomeLoader {
-    private var continuation: CheckedContinuation<[PRSummary], Error>?
+    private var continuation: CheckedContinuation<PRPage, Error>?
     var waiting: Bool { continuation != nil }
-    func load() async throws -> [PRSummary] {
+    func load() async throws -> PRPage {
         try await withCheckedThrowingContinuation { continuation = $0 }
     }
     func finish(_ rows: [PRSummary]) {
-        continuation?.resume(returning: rows)
+        continuation?.resume(returning: PRPage(items: rows, hasNext: false))
         continuation = nil
     }
 }

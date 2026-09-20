@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 final class ReviewWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSToolbarDelegate, NSWindowDelegate, NSMenuItemValidation {
     private let github: GitHubClient
+    private var avatarTask: Task<Void, Never>?
     enum Screen { case home, review }
     private(set) var screen: Screen = .home
     private enum Account { case checking, signedOut, signedIn(GitHubUser), failed }
@@ -11,7 +12,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var accountTask: Task<Void, Never>?
     private var signInSheet: GitHubSignInController?
     private var pendingPR: String?
-    private(set) lazy var home = PRHomeController { [github] limit in try await github.pullRequests(limit: limit) }
+    private(set) lazy var home = PRHomeController { [github] query, page in
+        try await github.pullRequests(query: query, page: page)
+    }
     private var store: ReviewStore?
     private var preferences = ReviewPreferences()
     private var snapshot: ReviewSnapshot?
@@ -128,6 +131,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         glass.contentView = splitController.view
         let drop = PRDropView()
         drop.onOpenPR = { [weak self] in self?.openPR($0) }
+        drop.onPaste = { [weak self] in self?.openPR($0) }
         Style.pin(glass, in: drop)
         let homeView = home.view
         homeView.translatesAutoresizingMaskIntoConstraints = false
@@ -829,7 +833,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
 
     private func setAccount(_ value: Account) {
         account = value
+        avatarTask?.cancel()
         let item = toolbarItems[.init("account")]
+        item?.image = Icons.toolbarImage("person.crop.circle")
         setActivity(.account, active: false)
         item?.isEnabled = true
         switch value {
@@ -842,7 +848,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             item?.label = "Sign in to GitHub"
             home.setUnavailable("Sign in to GitHub to see your open pull requests.", clearResults: true)
         case .signedIn(let user):
-            item?.label = "Sign out \(user.login)"
+            item?.label = "Sign in to GitHub (\(user.login))"
+            loadAvatar(user)
             home.setUnavailable(nil, clearResults: true)
             home.refresh()
         case .failed:
@@ -855,24 +862,30 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         guard accountTask == nil, !busy, window?.attachedSheet == nil, settleDraft() else { return }
         switch account {
         case .checking: break
-        case .signedOut: signIn()
-        case .failed: bootstrapAccount()
-        case .signedIn:
-            pendingPR = nil
-            accountTask = Task { [weak self, github] in
-                do {
-                    try await github.signOut()
-                    self?.accountTask = nil
-                    self?.setAccount(.signedOut)
-                } catch {
-                    self?.accountTask = nil
-                    self?.setActivity(.account, active: false)
-                    self?.toolbarItems[.init("account")]?.isEnabled = true
-                    self?.showError(error, title: "Could not sign out", recovery: "Retry") { [weak self] in self?.accountAction() }
+        case .signedOut, .failed, .signedIn: signIn()
+        }
+    }
+
+    private func loadAvatar(_ user: GitHubUser) {
+        guard let url = user.avatarURL, url.scheme == "https" else { return }
+        avatarTask = Task { [weak self] in
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                try Task.checkCancellation()
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                      let image = NSImage(data: data) else { throw GitHubError.invalidResponse }
+                let size = NSSize(width: 20, height: 20)
+                let circular = NSImage(size: size, flipped: false) { rect in
+                    NSBezierPath(ovalIn: rect).addClip()
+                    image.draw(in: rect)
+                    return true
                 }
+                circular.isTemplate = false
+                self?.toolbarItems[.init("account")]?.image = circular
+            } catch is CancellationError {
+            } catch {
+                NSLog("Could not load GitHub avatar: %@", error.localizedDescription)
             }
-            toolbarItems[.init("account")]?.isEnabled = false
-            setActivity(.account, active: true)
         }
     }
 
@@ -898,7 +911,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(openComparison), #selector(refresh):
+        case #selector(openComparison), #selector(openRecent(_:)), #selector(showRecent(_:)):
+            return screen == .home && !busy && window?.attachedSheet == nil
+        case #selector(refresh):
             return !busy && window?.attachedSheet == nil
         case #selector(findInReview): return true
         case #selector(paste(_:)):

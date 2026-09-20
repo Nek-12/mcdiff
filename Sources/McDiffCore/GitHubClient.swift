@@ -7,7 +7,8 @@ public enum GitHubError: Error, LocalizedError, Sendable, Equatable {
     case accessDenied
     case incompleteResults
     case invalidResponse
-    case invalidLimit
+    case invalidPage
+    case invalidSearch
     case credentials(String)
     case network(Int)
     case http(status: Int, advice: String)
@@ -21,7 +22,8 @@ public enum GitHubError: Error, LocalizedError, Sendable, Equatable {
         case .accessDenied: return "GitHub sign-in was declined. You can start sign-in again."
         case .incompleteResults: return "GitHub returned an incomplete pull request list. Try refreshing again."
         case .invalidResponse: return "GitHub returned an unexpected response. Try again; if it continues, update McDiff."
-        case .invalidLimit: return "Request between 1 and 1,000 pull requests."
+        case .invalidPage: return "Request a pull request page between 1 and 34. GitHub search exposes at most 1,000 results; narrow your search to find more."
+        case .invalidSearch: return "Search using plain words, without GitHub qualifiers, quotes, or backslashes. Results always show your open pull requests."
         case .credentials(let message), .oauth(let message): return message
         case .network(let code): return "Could not connect to GitHub (network error \(code)). Check your connection and try again."
         case .http(let status, let advice): return "GitHub request failed (HTTP \(status)). \(advice)"
@@ -31,6 +33,11 @@ public enum GitHubError: Error, LocalizedError, Sendable, Equatable {
 
 public struct GitHubUser: Decodable, Sendable, Equatable {
     public let login: String
+    public let avatarURL: URL?
+    private enum CodingKeys: String, CodingKey {
+        case login
+        case avatarURL = "avatarUrl"
+    }
 }
 
 public struct GitHubDeviceAuthorization: Sendable {
@@ -156,29 +163,32 @@ public actor GitHubClient {
         refresh = nil
     }
 
-    public func pullRequests(limit: Int = 100) async throws -> [PRSummary] {
-        guard (1...1000).contains(limit) else { throw GitHubError.invalidLimit }
+    public func pullRequests(query: String = "", page: Int = 1) async throws -> PRPage {
+        let pageSize = 30
+        let searchMaximum = 1000
+        guard (1...((searchMaximum + pageSize - 1) / pageSize)).contains(page) else { throw GitHubError.invalidPage }
+        guard !query.contains(where: { ":\"\\".contains($0) }) else { throw GitHubError.invalidSearch }
+        // Quote every word so Boolean operators and grouping cannot broaden the authored-open scope.
+        let terms = query.split(whereSeparator: \.isWhitespace).map { "\"\($0)\"" }.joined(separator: " ")
         let token = try await accessToken()
         let generation = generation
         let user = try await user(token: token)
-        var results: [PRSummary] = []
-        let perPage = min(limit, 100)
-        for page in 1...10 {
-            let response: SearchResponse = try await api(path: "/search/issues", token: token, query: [
-                URLQueryItem(name: "q", value: "is:pr is:open author:\(user.login)"),
-                URLQueryItem(name: "sort", value: "created"), URLQueryItem(name: "order", value: "desc"),
-                URLQueryItem(name: "per_page", value: String(perPage)), URLQueryItem(name: "page", value: String(page))
-            ])
-            guard self.generation == generation else { throw CancellationError() }
-            guard !response.incompleteResults else { throw GitHubError.incompleteResults }
-            for item in response.items {
-                guard let pr = try? GitHubPR.parse(item.htmlUrl), pr.url == item.htmlUrl else { throw GitHubError.invalidResponse }
-                results.append(PRSummary(pr: pr, title: item.title, createdAt: item.createdAt, isDraft: item.draft))
-                if results.count == limit { return results }
-            }
-            if response.items.count < perPage || results.count >= response.totalCount { break }
+        let scope = "is:pr is:open author:\(user.login)"
+        let response: SearchResponse = try await api(path: "/search/issues", token: token, query: [
+            URLQueryItem(name: "q", value: terms.isEmpty ? scope : "\(scope) \(terms)"),
+            URLQueryItem(name: "sort", value: "created"), URLQueryItem(name: "order", value: "desc"),
+            URLQueryItem(name: "per_page", value: String(pageSize)), URLQueryItem(name: "page", value: String(page))
+        ])
+        guard self.generation == generation else { throw CancellationError() }
+        guard !response.incompleteResults else { throw GitHubError.incompleteResults }
+        guard response.totalCount >= 0, response.items.count <= pageSize else { throw GitHubError.invalidResponse }
+        let offset = (page - 1) * pageSize
+        let results = try response.items.prefix(searchMaximum - offset).map { item in
+            guard let pr = try? GitHubPR.parse(item.htmlUrl), pr.url == item.htmlUrl else { throw GitHubError.invalidResponse }
+            return PRSummary(pr: pr, title: item.title, createdAt: item.createdAt, isDraft: item.draft)
         }
-        return results
+        return PRPage(items: results, hasNext: results.count == pageSize &&
+                      offset + results.count < min(response.totalCount, searchMaximum))
     }
 
     public func revisions(for pr: GitHubPR) async throws -> GitHubPRRevisions {
@@ -268,6 +278,7 @@ public actor GitHubClient {
     }
 
     private func send<T: Decodable>(_ original: URLRequest) async throws -> T {
+        try Task.checkCancellation()
         var request = original
         request.setValue("McDiff", forHTTPHeaderField: "User-Agent")
         request.cachePolicy = .reloadIgnoringLocalCacheData

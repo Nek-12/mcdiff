@@ -3,7 +3,7 @@ import McDiffCore
 
 @MainActor
 final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    typealias Loader = @Sendable (Int) async throws -> [PRSummary]
+    typealias Loader = @Sendable (String, Int) async throws -> PRPage
     let searchItem = NSSearchToolbarItem(itemIdentifier: NSToolbarItem.Identifier("pr-home-search"))
     var onOpenPR: ((String) -> Void)?
     var onResume: (() -> Void)?
@@ -18,40 +18,51 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         unavailableMessage = message
         loadError = nil
         if clearResults {
-            results = []
-            hasLoaded = false
-            loadedLimit = 100
+            loaded = nil
+            requested = Request(query: searchQuery, page: 1)
         }
         _ = view
-        filterResults()
+        reloadResults()
     }
 
-    private(set) var results: [PRSummary] = []
-    private(set) var filteredResults: [PRSummary] = []
+    private struct Request: Equatable {
+        let query: String
+        let page: Int
+        var description: String { query.isEmpty ? "page \(page)" : "page \(page) for “\(query)”" }
+    }
+    private struct Loaded {
+        let request: Request
+        let page: PRPage
+    }
+    private var requested = Request(query: "", page: 1)
+    private var loaded: Loaded?
+    var results: [PRSummary] {
+        guard !isLoading || loaded?.request == requested else { return [] }
+        return loaded?.page.items ?? []
+    }
     private(set) var isLoading = false
-    private(set) var loadedLimit = 100
-    private var requestedLimit = 100
-    private var hasLoaded = false
     private var loadError: String?
-    private static let maximumLimit = 1_000
     private let loader: Loader
+    private let openBrowser: (URL) -> Bool
     private var loadTask: Task<Void, Never>?
     let table: NSTableView = PRHomeTable()
     private let status = NSTextField(wrappingLabelWithString: "")
+    private let feedback = NSStackView()
     private let spinner = NSProgressIndicator()
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
-    private let moreButton = NSButton(title: "Load more", target: nil, action: nil)
-    private let reviewButton = NSButton(title: "Review", target: nil, action: nil)
-    private let githubButton = NSButton(title: "Open on GitHub", target: nil, action: nil)
+    private let previousButton = NSButton(title: "Previous", target: nil, action: nil)
+    private let nextButton = NSButton(title: "Next", target: nil, action: nil)
+    private let pageLabel = NSTextField(labelWithString: "")
     private let resumeButton = NSButton(title: "", target: nil, action: nil)
 
-    init(loader: @escaping Loader) {
+    init(openBrowser: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, loader: @escaping Loader) {
         self.loader = loader
+        self.openBrowser = openBrowser
         super.init(nibName: nil, bundle: nil)
         searchItem.searchField.placeholderString = "Search my pull requests"
         searchItem.searchField.delegate = self
         searchItem.searchField.sendsSearchStringImmediately = true
-        searchItem.toolTip = "Search pull request titles, repositories, and numbers"
+        searchItem.toolTip = "Search your open pull requests on GitHub. GitHub returns up to 1,000 results per search."
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -59,9 +70,10 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     override func loadView() {
         view = NSView()
         configure(retryButton, action: #selector(retry), tooltip: "Retry loading pull requests")
-        configure(moreButton, action: #selector(loadMore), tooltip: "Load the next 100 pull requests")
-        configure(reviewButton, action: #selector(openSelected), tooltip: "Review the selected pull request")
-        configure(githubButton, action: #selector(openOnGitHub), tooltip: "Open the selected pull request in your browser")
+        configure(previousButton, action: #selector(previousPage), tooltip: "Load the previous page")
+        configure(nextButton, action: #selector(nextPage), tooltip: "Load the next page")
+        pageLabel.font = .systemFont(ofSize: 12)
+        pageLabel.textColor = .secondaryLabelColor
         configure(resumeButton, action: #selector(resume), tooltip: "Return to the current review")
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -71,9 +83,9 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         status.isSelectable = true
         status.maximumNumberOfLines = 0
 
-        let feedback = NSStackView(views: [spinner, status, retryButton])
+        for child in [spinner, status, retryButton] { feedback.addArrangedSubview(child) }
         feedback.alignment = .top
-        let footer = NSStackView(views: [moreButton, resumeButton, NSView(), githubButton, reviewButton])
+        let footer = NSStackView(views: [resumeButton, NSView(), previousButton, pageLabel, nextButton])
         for stack in [feedback, footer] { stack.spacing = 12 }
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -93,7 +105,7 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         table.delegate = self
         table.dataSource = self
         table.target = self
-        table.doubleAction = #selector(openSelected)
+        table.action = #selector(openClicked)
         (table as? PRHomeTable)?.onReturn = { [weak self] in self?.openSelected() }
         scroll.documentView = table
         let content = NSStackView(views: [feedback, scroll, footer])
@@ -105,7 +117,7 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
+            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100)
         ])
@@ -116,59 +128,68 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         render()
     }
 
-    @objc func refresh() { startLoading(limit: loadedLimit) }
-    @objc func retry() { startLoading(limit: requestedLimit) }
-    @objc func loadMore() {
-        guard hasLoaded, results.count == loadedLimit, loadedLimit < Self.maximumLimit else { return }
-        startLoading(limit: min(loadedLimit + 100, Self.maximumLimit))
+    @objc func refresh() { startLoading(requested) }
+    @objc func retry() { startLoading(requested) }
+    @objc func previousPage() {
+        guard canNavigate, requested.page > 1 else { return }
+        startLoading(Request(query: requested.query, page: requested.page - 1))
+    }
+    @objc func nextPage() {
+        guard canNavigate, loaded?.page.hasNext == true else { return }
+        startLoading(Request(query: requested.query, page: requested.page + 1))
     }
 
-    private func startLoading(limit: Int) {
-        guard !isLoading, unavailableMessage == nil else { return }
+    private var canNavigate: Bool {
+        !isLoading && unavailableMessage == nil && loaded?.request == requested
+    }
+    private var searchQuery: String {
+        searchItem.searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func startLoading(_ request: Request, debounce: Bool = false) {
+        guard !isLoading || requested != request else { return }
+        loadTask?.cancel()
+        let selectedURL = selectedPR?.pr.url
+        requested = request
+        guard unavailableMessage == nil else { return }
         _ = view
         isLoading = true
-        requestedLimit = limit
         loadError = nil
-        render()
+        reloadResults(preserving: selectedURL)
         loadTask = Task { [weak self, loader] in
             do {
-                let result = try await loader(limit)
+                if debounce { try await Task.sleep(for: .milliseconds(300)) }
                 try Task.checkCancellation()
-                guard result.count <= limit else {
-                    throw GitError("GitHub returned more pull requests than requested. Retry the request.")
-                }
+                let page = try await loader(request.query, request.page)
+                try Task.checkCancellation()
                 guard let self else { return }
-                self.results = result
-                self.loadedLimit = limit
-                self.hasLoaded = true
+                self.loaded = Loaded(request: request, page: page)
             } catch {
                 guard !Task.isCancelled else { return }
                 guard let self else { return }
-                if case GitHubError.unauthenticated = error {
+                if case GitHubError.unauthenticated = error, let onAuthenticationRequired = self.onAuthenticationRequired {
                     self.isLoading = false
                     self.loadTask = nil
-                    self.onAuthenticationRequired?()
+                    onAuthenticationRequired()
                     return
                 }
-                self.loadError = "Couldn’t load your pull requests. Check your connection and GitHub sign-in, then retry.\n\(error.localizedDescription)"
+                self.loadError = "Couldn’t load \(request.description). Retry the request.\n\(error.localizedDescription)"
             }
             guard let self else { return }
             self.isLoading = false
             self.loadTask = nil
-            self.filterResults()
+            self.reloadResults(preserving: selectedURL)
         }
     }
 
-    func controlTextDidChange(_ obj: Notification) { filterResults() }
+    func controlTextDidChange(_ obj: Notification) {
+        guard searchQuery != requested.query else { return }
+        startLoading(Request(query: searchQuery, page: 1), debounce: true)
+    }
 
-    private func filterResults() {
-        let selectedURL = selectedPR?.pr.url
-        let query = searchItem.searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        filteredResults = results.filter {
-            query.isEmpty || "\($0.title) \($0.pr.repositoryKey) #\($0.pr.number)".localizedCaseInsensitiveContains(query)
-        }
+    private func reloadResults(preserving selectedURL: String? = nil) {
         table.reloadData()
-        if let row = filteredResults.firstIndex(where: { $0.pr.url == selectedURL }) {
+        if let row = results.firstIndex(where: { $0.pr.url == selectedURL }) {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         } else {
             table.deselectAll(nil)
@@ -179,27 +200,31 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     private func render() {
         if isLoading {
             spinner.startAnimation(nil)
-            status.stringValue = results.isEmpty ? "Loading your open pull requests…" : "Loading… Showing \(results.count) previously loaded pull requests."
+            status.stringValue = "Loading \(requested.description)…"
         } else {
             spinner.stopAnimation(nil)
             if let unavailableMessage { status.stringValue = unavailableMessage }
-            else if let loadError { status.stringValue = loadError }
-            else if !hasLoaded { status.stringValue = "Refresh to load your open pull requests." }
-            else if results.isEmpty { status.stringValue = "No open pull requests for your current GitHub account." }
+            else if let loadError {
+                let previous = loaded.map { "\nShowing previously loaded \($0.request.description)." } ?? ""
+                status.stringValue = loadError + previous
+            }
+            else if loaded == nil { status.stringValue = "Refresh to load your open pull requests." }
+            else if results.isEmpty {
+                status.stringValue = requested.query.isEmpty ? "No open pull requests on this page." : "No matching pull requests on this page."
+            }
             else {
-                let prefix = filteredResults.isEmpty ? "No matching pull requests." : "\(filteredResults.count) of \(results.count) loaded pull requests."
-                let limit = results.count < loadedLimit ? "" : loadedLimit == Self.maximumLimit
-                    ? " Showing the newest 1,000; GitHub search is limited to 1,000 results."
-                    : " Showing the newest \(loadedLimit). Load more to search older pull requests."
-                status.stringValue = prefix + limit
+                status.stringValue = ""
             }
         }
         retryButton.isHidden = loadError == nil
+        feedback.isHidden = status.stringValue.isEmpty && !isLoading && loadError == nil
         retryButton.isEnabled = !isLoading
-        moreButton.isHidden = !hasLoaded || results.count < loadedLimit || loadedLimit == Self.maximumLimit
-        moreButton.isEnabled = !isLoading
-        reviewButton.isEnabled = selectedPR != nil
-        githubButton.isEnabled = selectedPR != nil
+        previousButton.isEnabled = canNavigate && requested.page > 1
+        nextButton.isEnabled = canNavigate && loaded?.page.hasNext == true
+        pageLabel.stringValue = "Page \(isLoading ? requested.page : loaded?.request.page ?? requested.page)"
+        for control in [previousButton, pageLabel, nextButton] {
+            control.isHidden = unavailableMessage != nil || (!isLoading && loaded == nil)
+        }
     }
 
     private func configure(_ button: NSButton, action: Selector, tooltip: String) {
@@ -215,17 +240,23 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     private var selectedPR: PRSummary? {
-        filteredResults.indices.contains(table.selectedRow) ? filteredResults[table.selectedRow] : nil
+        results.indices.contains(table.selectedRow) ? results[table.selectedRow] : nil
     }
 
     @objc func openSelected() { if let selectedPR { onOpenPR?(selectedPR.pr.url) } }
-    @objc private func openOnGitHub() {
-        if let selectedPR, let url = URL(string: selectedPR.pr.url) { NSWorkspace.shared.open(url) }
+    @objc private func openClicked() {
+        guard results.indices.contains(table.clickedRow) else { return }
+        onOpenPR?(results[table.clickedRow].pr.url)
+    }
+    private func openOnGitHub(_ pr: GitHubPR) {
+        guard let url = URL(string: pr.url) else { return }
+        if !openBrowser(url) {
+            status.stringValue = "Couldn’t open GitHub. Check your default browser and try the link again."
+        }
     }
     @objc private func resume() { onResume?() }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { filteredResults.count }
-    func tableViewSelectionDidChange(_ notification: Notification) { render() }
+    func numberOfRows(in tableView: NSTableView) -> Int { results.count }
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         PRSummaryRow()
     }
@@ -233,14 +264,23 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         let identifier = NSUserInterfaceItemIdentifier("pr-summary")
         let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? PRSummaryCell) ?? PRSummaryCell()
         cell.identifier = identifier
-        cell.show(filteredResults[row])
+        let summary = results[row]
+        cell.show(summary)
+        cell.onOpenGitHub = { [weak self] in self?.openOnGitHub(summary.pr) }
         return cell
     }
 }
 
 private final class PRSummaryRow: NSTableRowView {
     private var isMouseInside = false {
-        didSet { needsDisplay = true }
+        didSet {
+            needsDisplay = true
+            for cell in subviews.compactMap({ $0 as? PRSummaryCell }) { cell.setHovered(isMouseInside) }
+        }
+    }
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        (subview as? PRSummaryCell)?.setHovered(isMouseInside)
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -270,17 +310,32 @@ private final class PRHomeTable: NSTableView {
 private final class PRSummaryCell: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let metadata = NSTextField(labelWithString: "")
+    private let link = NSButton()
+    var onOpenGitHub: (() -> Void)?
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         let icon = NSImageView(image: Icons.image("git-pull-request") ?? NSImage())
         icon.contentTintColor = .secondaryLabelColor
         icon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(icon)
+        link.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
+        link.title = ""
+        link.isBordered = false
+        link.toolTip = "Open on GitHub"
+        link.target = self
+        link.action = #selector(openGitHub)
+        link.translatesAutoresizingMaskIntoConstraints = false
+        link.isHidden = true
+        addSubview(link)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 18),
-            icon.heightAnchor.constraint(equalToConstant: 18)
+            icon.heightAnchor.constraint(equalToConstant: 18),
+            link.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            link.centerYAnchor.constraint(equalTo: centerYAnchor),
+            link.widthAnchor.constraint(equalToConstant: 24),
+            link.heightAnchor.constraint(equalToConstant: 24)
         ])
         title.font = .systemFont(ofSize: 13, weight: .medium)
         metadata.font = .systemFont(ofSize: 11)
@@ -290,12 +345,14 @@ private final class PRSummaryCell: NSTableCellView {
             field.translatesAutoresizingMaskIntoConstraints = false
             addSubview(field)
             field.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12).isActive = true
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8).isActive = true
+            field.trailingAnchor.constraint(equalTo: link.leadingAnchor, constant: -8).isActive = true
         }
         title.topAnchor.constraint(equalTo: topAnchor, constant: 7).isActive = true
         metadata.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4).isActive = true
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func setHovered(_ hovered: Bool) { link.isHidden = !hovered }
+    @objc private func openGitHub() { onOpenGitHub?() }
     func show(_ summary: PRSummary) {
         title.stringValue = summary.title
         let age = RelativeDateTimeFormatter().localizedString(for: summary.createdAt, relativeTo: Date())

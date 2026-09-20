@@ -12,5 +12,5 @@ iconutil -c icns "$PWD/.build/AppIcon.iconset" -o "$APP/Contents/Resources/AppIc
 for bundle in "$BIN"/*.bundle; do
     [[ -e "$bundle" ]] && cp -R "$bundle" "$APP/Contents/Resources/"
 done
-codesign --force --deep --sign - "$APP"
+codesign --force --deep --sign "Developer ID Application: Respawn LLC (WY) (7L6T5KD8TA)" "$APP"
 echo "$APP"

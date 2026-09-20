@@ -2,16 +2,27 @@ import AppKit
 import McDiffCore
 
 /// A window-wide destination; text editors retain their normal paste responder.
-final class PRDropView: NSView {
+final class PRDropView: NSView, NSMenuItemValidation {
     var onOpenPR: ((String) -> Void)?
+    var onPaste: ((String) -> Void)?
+    private let pasteboard: NSPasteboard
     private var highlighted = false {
         didSet { needsDisplay = true }
     }
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
+    override init(frame frameRect: NSRect) {
+        pasteboard = .general
+        super.init(frame: frameRect)
         registerForDraggedTypes([.URL, .string])
     }
+
+    init(frame frameRect: NSRect, pasteboard: NSPasteboard) {
+        self.pasteboard = pasteboard
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.URL, .string])
+    }
+
+    override var acceptsFirstResponder: Bool { true }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -22,6 +33,19 @@ final class PRDropView: NSView {
         let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.contains(where: \.isWhitespace) else { return nil }
         return try? GitHubPR.parse(text)
+    }
+
+    @objc func paste(_ sender: Any?) {
+        guard let pr = Self.pullRequest(from: pasteboard) else {
+            NSSound.beep()
+            return
+        }
+        onPaste?(pr.url)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(paste(_:)) else { return true }
+        return Self.pullRequest(from: pasteboard) != nil
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {

@@ -3,6 +3,18 @@ import XCTest
 @testable import McDiffCore
 
 final class GitHubClientTests: XCTestCase {
+    func testFailedReplacementSignInPreservesCredentials() async throws {
+        let (client, transport, store) = makeClient(signedIn: true)
+        let previous = try store.load()
+        transport.responses = [.json(device), .json(#"{"error":"access_denied"}"#)]
+        let authorization = try await client.beginSignIn()
+        do {
+            _ = try await client.completeSignIn(authorization)
+            XCTFail("Expected denied authorization")
+        } catch {}
+        XCTAssertEqual(try store.load(), previous)
+    }
+
     override func tearDown() {
         GitHubStubProtocol.clear()
         super.tearDown()
@@ -16,16 +28,25 @@ final class GitHubClientTests: XCTestCase {
         XCTAssertTrue(transport.requests.isEmpty)
     }
 
+    func testCurrentUserDecodesAvatarURLFromGitHubResponse() async throws {
+        let (client, transport, _) = makeClient(signedIn: true)
+        transport.responses = [.json(#"{"login":"nek-12","avatar_url":"https://avatars.githubusercontent.com/u/123?v=4"}"#)]
+        let user = try await client.currentUser()
+        XCTAssertEqual(user?.avatarURL?.absoluteString, "https://avatars.githubusercontent.com/u/123?v=4")
+    }
+
     func testSignInPollsAtServerIntervalSlowsDownAndPersistsOnlyAfterIdentityLookup() async throws {
         let (client, transport, store) = makeClient()
         transport.responses = [.json(device), .json(#"{"error":"authorization_pending"}"#),
-                               .json(#"{"error":"slow_down"}"#), .json(token), .json(#"{"login":"nek-12"}"#)]
+                               .json(#"{"error":"slow_down"}"#), .json(token),
+                               .json(#"{"login":"nek-12","avatar_url":"https://avatars.githubusercontent.com/u/123"}"#)]
         let authorization = try await client.beginSignIn()
         XCTAssertEqual(authorization.userCode, "ABCD-EFGH")
         XCTAssertEqual(authorization.verificationURL.absoluteString, "https://github.com/login/device")
         XCTAssertNil(try store.load())
         let user = try await client.completeSignIn(authorization)
         XCTAssertEqual(user.login, "nek-12")
+        XCTAssertEqual(user.avatarURL?.absoluteString, "https://avatars.githubusercontent.com/u/123")
         XCTAssertEqual(transport.clock.waits, [5, 5, 10])
         XCTAssertEqual(try store.credential()?.accessToken, "test-access")
         let requests = transport.requests
@@ -121,46 +142,83 @@ final class GitHubClientTests: XCTestCase {
     func testInboxUsesAuthenticatedAuthorAndBoundedPagination() async throws {
         let (client, transport, _) = makeClient(signedIn: true)
         transport.responses = [.json(#"{"login":"nek-12"}"#),
-                               .json(search(items: (1...100).map(item).joined(separator: ","), total: 105)),
-                               .json(search(items: (101...105).map(item).joined(separator: ","), total: 105))]
-        let results = try await client.pullRequests(limit: 103)
-        XCTAssertEqual(results.count, 103)
-        XCTAssertEqual(results.last?.pr.number, 103)
-        XCTAssertTrue(results[0].isDraft)
-        XCTAssertEqual(results[0].title, "Review 1")
+                               .json(search(items: (1...30).map(item).joined(separator: ","), total: 35)),
+                               .json(#"{"login":"nek-12"}"#),
+                               .json(search(items: (31...35).map(item).joined(separator: ","), total: 35))]
+        let first = try await client.pullRequests()
+        XCTAssertEqual(first.items.count, 30)
+        XCTAssertTrue(first.hasNext)
+        XCTAssertTrue(first.items[0].isDraft)
+        XCTAssertEqual(first.items[0].title, "Review 1")
+        XCTAssertEqual(transport.requests.count, 2)
+        let second = try await client.pullRequests(page: 2)
+        XCTAssertEqual(second.items.map(\.pr.number), Array(31...35))
+        XCTAssertFalse(second.hasNext)
         let query = URLComponents(url: transport.requests[1].url!, resolvingAgainstBaseURL: false)?.queryItems
         XCTAssertEqual(query?.first { $0.name == "q" }?.value, "is:pr is:open author:nek-12")
         XCTAssertEqual(query?.first { $0.name == "sort" }?.value, "created")
         XCTAssertEqual(query?.first { $0.name == "order" }?.value, "desc")
-        XCTAssertEqual(query?.first { $0.name == "per_page" }?.value, "100")
-        XCTAssertEqual(URLComponents(url: transport.requests[2].url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "page" }?.value, "2")
+        XCTAssertEqual(query?.first { $0.name == "per_page" }?.value, "30")
+        XCTAssertEqual(URLComponents(url: transport.requests[3].url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "page" }?.value, "2")
     }
 
-    func testInboxRejectsPartialSearchUnsafeURLsInvalidDatesAndInvalidLimits() async throws {
+    func testInboxSearchIsServerSideAndRetainsScopeOnEveryPage() async throws {
+        let (client, transport, _) = makeClient(signedIn: true)
+        for page in 1...2 {
+            transport.responses = [.json(#"{"login":"nek-12"}"#),
+                                   .json(search(items: item(page), total: 60))]
+            let result = try await client.pullRequests(query: "  fix OR (failure)  ", page: page)
+            XCTAssertEqual(result.items.first?.pr.number, page)
+            let query = URLComponents(url: transport.requests.last!.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "q" }?.value,
+                           #"is:pr is:open author:nek-12 "fix" "OR" "(failure)""#)
+            XCTAssertEqual(query?.first { $0.name == "page" }?.value, String(page))
+        }
+    }
+
+    func testInboxRejectsPartialSearchUnsafeURLsInvalidDatesAndInvalidPages() async throws {
         for (response, expected) in [
             (search(items: item(1), incomplete: true), GitHubError.incompleteResults),
             (search(items: item(1).replacingOccurrences(of: "github.com", with: "evil.invalid")), .invalidResponse),
-            (search(items: item(1).replacingOccurrences(of: "2026-09-20T10:00:00Z", with: "yesterday")), .invalidResponse)
+            (search(items: item(1).replacingOccurrences(of: "2026-09-20T10:00:00Z", with: "yesterday")), .invalidResponse),
+            (search(items: "", total: -1), .invalidResponse),
+            (search(items: (1...31).map(item).joined(separator: ","), total: 31), .invalidResponse)
         ] {
             let (client, transport, _) = makeClient(signedIn: true)
             transport.responses = [.json(#"{"login":"nek-12"}"#), .json(response)]
             await assertError(expected) { _ = try await client.pullRequests() }
         }
         let (client, transport, _) = makeClient(signedIn: true)
-        for limit in [0, -1, 1001] {
-            await assertError(.invalidLimit) { _ = try await client.pullRequests(limit: limit) }
+        for page in [0, -1, 35, Int.max] {
+            await assertError(.invalidPage) { _ = try await client.pullRequests(page: page) }
+        }
+        for query in ["author:someone", "is:closed", #"fix" OR is:issue"#, #"fix\failure"#] {
+            await assertError(.invalidSearch) { _ = try await client.pullRequests(query: query) }
         }
         XCTAssertTrue(transport.requests.isEmpty)
     }
 
     func testInboxStopsAtSearchMaximumEvenWhenMoreResultsExist() async throws {
         let (client, transport, _) = makeClient(signedIn: true)
-        transport.responses = [.json(#"{"login":"nek-12"}"#)] + (0..<10).map { page in
-            .json(search(items: ((page * 100 + 1)...(page * 100 + 100)).map(item).joined(separator: ","), total: 5000))
+        for (page, range, hasNext) in [(33, 961...990, true), (34, 991...1000, false)] {
+            transport.responses = [.json(#"{"login":"nek-12"}"#),
+                                   .json(search(items: range.map(item).joined(separator: ","), total: 5000))]
+            let result = try await client.pullRequests(page: page)
+            XCTAssertEqual(result.items.map(\.pr.number), Array(range))
+            XCTAssertEqual(result.hasNext, hasNext)
         }
-        let results = try await client.pullRequests(limit: 1000)
-        XCTAssertEqual(results.count, 1000)
-        XCTAssertEqual(transport.requests.count, 11)
+        XCTAssertEqual(transport.requests.count, 4)
+    }
+
+    func testInboxEmptyAndExactFullPageHaveNoNextPage() async throws {
+        for count in [0, 30] {
+            let (client, transport, _) = makeClient(signedIn: true)
+            transport.responses = [.json(#"{"login":"nek-12"}"#),
+                                   .json(search(items: (0..<count).map { item($0 + 1) }.joined(separator: ","), total: count))]
+            let result = try await client.pullRequests(query: " \n ")
+            XCTAssertEqual(result.items.count, count)
+            XCTAssertFalse(result.hasNext)
+        }
     }
 
     func testTransportFailureIsActionableWithoutEchoingRequestSecrets() async throws {
