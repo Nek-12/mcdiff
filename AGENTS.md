@@ -1,6 +1,6 @@
-# Slopdiff
+# McDiff
 
-Slopdiff is a personal macOS code-review app for agent-generated changes. Build with Swift Package Manager; package the executable as a native app using `scripts/build-app.sh`. Run `swift test` for domain and Git integration tests.
+McDiff is a personal macOS code-review app for agent-generated changes. Build with Swift Package Manager; package the executable as a native app using `scripts/build-app.sh`. Run `swift test` for domain and Git integration tests.
 
 ## Product contract
 
@@ -18,9 +18,13 @@ Slopdiff is a personal macOS code-review app for agent-generated changes. Build 
 - Follow system appearance/accent and use Monaspace Neon for source with system monospace fallback. Test the dark appearance.
 - Use the Atom One syntax palette; preserve the user's preferred coloring.
 - Use one native Liquid Glass toolbar integrated with traffic lights, a compact flat native sidebar, and a consistently tinted glass window. Use system-generated toolbar items in the regular unified style, without custom button views or forced control heights. Group related controls with spacing. File-header hairlines and subtle rounded import highlights provide separation; empty diff cells remain transparent.
-- Before opening a comparison, hide the sidebar and review controls. Show only Open/Recents and a centered comparison icon with Open a comparison; no marketing text. Restore the review layout after loading.
+- Fresh launches show Home with My open PRs: open pull requests authored by the signed-in user across personal and organization repositories, including drafts, newest creation first. Show title, repository, number, creation age, and draft status with native search, Review, and Open on GitHub actions. Local comparisons remain available without sign-in.
+- Home hides the review sidebar and review controls. Explicit Home and Resume actions preserve the loaded review and its position; app activation preserves the current screen. Protect unsaved comments when leaving a review.
+- Use direct GitHub REST with OAuth device authorization and macOS Keychain credentials, including refresh-token rotation. Do not depend on the gh executable, embed client secrets, or store tokens in preferences. Sign-out clears account-owned Home results.
+- A single GitHub PR URL dropped on the window or pasted at window level opens through the same comparison flow as Home. Paste within text editors remains text paste. Do not monitor the clipboard or add browser extensions.
+- Package and modules are McDiff/McDiffCore; the bundle identity is dev.nek12.mcdiff. Use McDiff storage without reading or migrating Slopdiff data.
 - Keep review chrome minimal: no raw hunk headers, Original/Changed labels, repeated file categories, reviewed counter, load statistics, bottom hint bar, or comparison-title bubble. The copy action is named `Copy review`.
-- Place compact addition/deletion counts beside the filename. Align the toolbar separator with the sidebar: Open/Refresh/Recents on the left; Next/Previous/Review-next and a text-free spinner on the right, then flexible space and Search, Wrap, Unified/Split, Comments/Copy/Export.
+- Place compact addition/deletion counts beside the filename. Keep Open and Recents on Home. In reviews, align the toolbar separator with the sidebar: Home/Refresh on the left; Next/Previous/Review-next and a text-free spinner on the right, then flexible space and Search, Wrap, Unified/Split, Comments/Copy/Export.
 - Provide text tooltips on buttons and subtle animations for checkbox and state changes. Successful Copy review gives visible, temporary confirmation; repeated clicks restart it. Animate presentation without moving the fixed review action or introducing animated row-height measurement.
 - Finishing a selection on actual code opens a non-modal comment editor automatically. Empty diff cells and trailing space do not open it. Saved comments have clickable gutter markers; selecting their range reopens them. Save is explicit; preserve unsaved edits on failure and require explicit discard. Do not add persistent drafts or automatic outside-click saving.
 - Keep the split diff halves exactly equal; unified source uses the full width. Horizontal overflow and offsets belong to each file and side independently, controlled by trackpad or Shift-wheel over that side. Do not show horizontal scrollbar controls or reserve a layout strip. Every app-owned scroll view uses overlay scrollbars. A remembered Soft wrap toggle keeps paired rows aligned and preserves original line numbers.

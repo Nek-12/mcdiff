@@ -2,21 +2,21 @@
 import PackageDescription
 
 let package = Package(
-    name: "Slopdiff",
+    name: "McDiff",
     platforms: [.macOS(.v26)],
-    products: [.executable(name: "Slopdiff", targets: ["Slopdiff"])],
+    products: [.executable(name: "McDiff", targets: ["McDiff"])],
     dependencies: [
         .package(url: "https://github.com/raspu/Highlightr.git", exact: "2.3.0"),
         .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0")
     ],
     targets: [
-        .target(name: "SlopdiffCore"),
+        .target(name: "McDiffCore"),
         .executableTarget(
-            name: "Slopdiff",
-            dependencies: ["SlopdiffCore", "Highlightr", .product(name: "Markdown", package: "swift-markdown")],
+            name: "McDiff",
+            dependencies: ["McDiffCore", "Highlightr", .product(name: "Markdown", package: "swift-markdown")],
             resources: [.copy("Resources")]),
-        .testTarget(name: "SlopdiffCoreTests", dependencies: ["SlopdiffCore"]),
-        .testTarget(name: "SlopdiffUITests", dependencies: ["Slopdiff", "SlopdiffCore"])
+        .testTarget(name: "McDiffCoreTests", dependencies: ["McDiffCore"]),
+        .testTarget(name: "McDiffUITests", dependencies: ["McDiff", "McDiffCore"])
     ],
     swiftLanguageModes: [.v5]
 )
