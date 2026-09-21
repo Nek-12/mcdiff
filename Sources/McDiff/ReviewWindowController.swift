@@ -126,7 +126,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         backdrop.addChild(splitController)
         let glass = NSGlassEffectView()
         glass.style = .regular
-        glass.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(0.30)
+        glass.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(0.65)
         glass.cornerRadius = 0
         glass.contentView = splitController.view
         let drop = PRDropView()
@@ -339,7 +339,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let main = NSView()
         diff.translatesAutoresizingMaskIntoConstraints = false; main.addSubview(diff)
         NSLayoutConstraint.activate([
-            diff.leadingAnchor.constraint(equalTo: main.safeAreaLayoutGuide.leadingAnchor, constant: 4),
+            // Match the native toolbar group's eight-point inset after the tracking separator.
+            diff.leadingAnchor.constraint(equalTo: main.safeAreaLayoutGuide.leadingAnchor, constant: 8),
             diff.trailingAnchor.constraint(equalTo: main.safeAreaLayoutGuide.trailingAnchor),
             diff.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),
             diff.bottomAnchor.constraint(equalTo: main.bottomAnchor)

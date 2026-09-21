@@ -124,7 +124,7 @@ final class ViewportTests: XCTestCase {
         view.expanded = Set(files.map(\.path))
         view.setFiles(files, presentations: Dictionary(uniqueKeysWithValues: files.map { ($0.path, DiffPresentation.rows(for: $0)) }))
         try await ready(view)
-        XCTAssertEqual(view.scroll.scrollerStyle, .overlay)
+        XCTAssertEqual(view.scroll.scrollerStyle, NSScroller.preferredScrollerStyle)
         XCTAssertEqual(view.scroll.frame, view.bounds)
         XCTAssertGreaterThan(view.scrollableWidth(file: 0, side: .old), view.scrollableWidth(file: 0, side: .new))
         XCTAssertEqual(view.scrollableWidth(file: 1, side: .old), 0)

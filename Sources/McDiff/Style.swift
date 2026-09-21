@@ -106,7 +106,7 @@ final class FadingScrollView: NSScrollView {
     private let fade = CAGradientLayer()
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        scrollerStyle = .overlay
+        scrollerStyle = NSScroller.preferredScrollerStyle
         autohidesScrollers = true
         wantsLayer = true
         fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]

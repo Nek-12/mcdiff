@@ -1063,9 +1063,9 @@ final class DiffCell: NSView {
         switch row.content {
         case .file:
             NSColor.separatorColor.withAlphaComponent(0.30).setFill()
-            NSRect(x: 12, y: 0, width: max(0, width - 24), height: 0.5).fill()
+            NSRect(x: 0, y: 0, width: max(0, width - 12), height: 0.5).fill()
             let isOpen = owner.expanded.contains(file.path)
-            Icons.draw(isOpen ? "chevron-down" : "chevron-right", in: NSRect(x: 14, y: 12, width: 14, height: 14))
+            Icons.draw(isOpen ? "chevron-down" : "chevron-right", in: NSRect(x: 2, y: 12, width: 14, height: 14))
             let title = file.headerTitle
             let titleFont = NSFont.systemFont(ofSize: 12, weight: .medium)
             let countFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
@@ -1073,7 +1073,7 @@ final class DiffCell: NSView {
             let addedWidth = (additions as NSString).size(withAttributes: [.font: countFont]).width
             let removedWidth = (deletions as NSString).size(withAttributes: [.font: countFont]).width
             let buttonWidth = markdownButton.flatMap { $0.isHidden ? nil : $0.frame.width + 12 } ?? 0
-            let available = max(0, width - 12 - buttonWidth - 36 - 10 - addedWidth - 6 - removedWidth)
+            let available = max(0, width - 12 - buttonWidth - 24 - 10 - addedWidth - 6 - removedWidth)
             let titleWidth = min(available, (title as NSString).size(withAttributes: [.font: titleFont]).width)
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byTruncatingMiddle
@@ -1085,19 +1085,19 @@ final class DiffCell: NSView {
                 let active = owner.currentSearchMatch == DiffSearchMatch(target: .path(file: row.file), range: range)
                 titleText.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(active ? 0.70 : 0.35), range: range)
             }
-            titleText.draw(in: NSRect(x: 36, y: 11, width: titleWidth, height: 20))
-            draw(additions, at: NSPoint(x: 36 + titleWidth + 10, y: 12), font: countFont, color: .systemGreen)
-            draw(deletions, at: NSPoint(x: 36 + titleWidth + 10 + addedWidth + 6, y: 12), font: countFont, color: .systemRed)
+            titleText.draw(in: NSRect(x: 24, y: 11, width: titleWidth, height: 20))
+            draw(additions, at: NSPoint(x: 24 + titleWidth + 10, y: 12), font: countFont, color: .systemGreen)
+            draw(deletions, at: NSPoint(x: 24 + titleWidth + 10 + addedWidth + 6, y: 12), font: countFont, color: .systemRed)
         case .hunk:
             draw("···", at: NSPoint(x: 34, y: -1), font: .systemFont(ofSize: 12), color: .tertiaryLabelColor)
         case .imports(let pairs, let block):
             NSColor.separatorColor.withAlphaComponent(0.08).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 12, dy: 2), xRadius: 5, yRadius: 5).fill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 2, width: max(0, width - 12), height: bounds.height - 4), xRadius: 5, yRadius: 5).fill()
             let open = owner.importsExpanded(path: file.path, block: block)
-            Icons.draw(open ? "chevron-down" : "chevron-right", in: NSRect(x: 19, y: 8, width: 12, height: 12))
+            Icons.draw(open ? "chevron-down" : "chevron-right", in: NSRect(x: 7, y: 8, width: 12, height: 12))
             let changed = pairs.filter { $0.old?.kind == .deletion || $0.new?.kind == .addition }.count
             draw("Imports · \(pairs.count) lines\(changed > 0 ? " · \(changed) changed" : "")",
-                 at: NSPoint(x: 40, y: 8), font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+                 at: NSPoint(x: 28, y: 8), font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
         case .notice(let text):
             draw(text, at: NSPoint(x: 22, y: 15), font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         case .padding:

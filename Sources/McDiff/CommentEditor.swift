@@ -72,8 +72,8 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         textView.drawsBackground = false
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = NSScroller.preferredScrollerStyle
         scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.documentView = textView

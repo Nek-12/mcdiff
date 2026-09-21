@@ -5,6 +5,31 @@ import XCTest
 
 final class PRHomeTests: XCTestCase {
     @MainActor
+    func testHomeHighlightAlignsWithCloseButtonAndScrollersFollowSystem() async throws {
+        let home = PRHomeController { _ , page in try Self.page(page, count: 1) }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = home
+        home.refresh()
+        await waitFor { home.table.numberOfRows == 1 }
+        home.view.layoutSubtreeIfNeeded()
+        home.view.layoutSubtreeIfNeeded()
+        let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
+        let closeLeft = home.view.convert(close.bounds, from: close).minX
+        let rowLeft = home.view.convert(home.table.rect(ofRow: 0), from: home.table).minX + 2
+        XCTAssertEqual(rowLeft, closeLeft, accuracy: 0.5)
+        XCTAssertTrue(home.scroll.autohidesScrollers)
+        XCTAssertEqual(home.scroll.scrollerStyle, NSScroller.preferredScrollerStyle)
+        XCTAssertEqual(FadingScrollView().scrollerStyle, NSScroller.preferredScrollerStyle)
+        if UserDefaults.standard.string(forKey: "AppleShowScrollBars") == "Always" {
+            XCTAssertEqual(home.scroll.scrollerStyle, .legacy)
+        } else if UserDefaults.standard.string(forKey: "AppleShowScrollBars") == "WhenScrolling" {
+            XCTAssertEqual(home.scroll.scrollerStyle, .overlay)
+        }
+        XCTAssertFalse(window.isVisible)
+    }
+
+    @MainActor
     private func waitFor(_ predicate: () -> Bool) async {
         for _ in 0..<400 {
             if predicate() { return }

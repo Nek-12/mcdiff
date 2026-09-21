@@ -5,6 +5,32 @@ import XCTest
 
 final class RowPaintTests: XCTestCase {
     @MainActor
+    func testFileAndImportHeadersReachTheDiffLeadingEdge() throws {
+        _ = NSApplication.shared
+        let view = DiffViewport(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let file = FileDiff(path: "source.ts", hunks: [DiffHunk(header: "", lines: [
+            DiffLine(kind: .addition, text: "import { one } from 'one';", oldNumber: nil, newNumber: 1),
+            DiffLine(kind: .addition, text: "import { two } from 'two';", oldNumber: nil, newNumber: 2)
+        ])], fingerprint: "imports")
+        view.expanded = [file.path]
+        view.setFiles([file], presentations: [file.path: DiffPresentation.rows(for: file)])
+        let imports = try XCTUnwrap(view.rows.firstIndex { if case .imports = $0.content { return true }; return false })
+        for (row, y) in [(0, CGFloat(0)), (imports, CGFloat(14))] {
+            let cell = DiffCell(frame: NSRect(x: 0, y: 0, width: 800, height: view.rows[row].height))
+            cell.owner = view
+            cell.rowIndex = row
+            let image = NSImage(size: cell.bounds.size, flipped: true) { _ in
+                cell.draw(cell.bounds)
+                return true
+            }
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+            let scale = CGFloat(bitmap.pixelsWide) / cell.bounds.width
+            let edge = try XCTUnwrap(bitmap.colorAt(x: 0, y: Int(y * scale)))
+            XCTAssertGreaterThan(edge.alphaComponent, 0, "Header must start at the source background edge")
+        }
+    }
+
+    @MainActor
     func testTintRunsStopAtContextAndRemainOnTheirOwnSide() async throws {
         _ = NSApplication.shared
         let view = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))

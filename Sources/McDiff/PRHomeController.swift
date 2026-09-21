@@ -29,6 +29,7 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
     private let resumeButton = NSButton(title: "", target: nil, action: nil)
     private var browserError: String?
+    private var leadingConstraint: NSLayoutConstraint?
 
     init(openBrowser: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, loader: @escaping Loader) {
         inbox = PRInbox(loader: loader)
@@ -62,7 +63,8 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         let footer = NSStackView(views: [resumeButton, NSView()])
         for stack in [feedback, footer] { stack.spacing = 12 }
         scroll.hasVerticalScroller = true
-        scroll.scrollerStyle = .overlay
+        scroll.scrollerStyle = NSScroller.preferredScrollerStyle
+        scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         table.headerView = nil
         table.backgroundColor = .clear
@@ -90,8 +92,10 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         content.spacing = 12
         content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(content)
+        let leading = content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18)
+        leadingConstraint = leading
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            leading,
             content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             content.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -121,6 +125,10 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        if let close = view.window?.standardWindowButton(.closeButton) {
+            let left = view.convert(close.bounds, from: close).minX - 2
+            if leadingConstraint?.constant != left { leadingConstraint?.constant = left }
+        }
         viewportChanged()
     }
 
@@ -209,6 +217,10 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
 }
 
 private final class PRSummaryRow: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        NSColor.selectedContentBackgroundColor.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 6, yRadius: 6).fill()
+    }
     private var isMouseInside = false {
         didSet {
             needsDisplay = true
