@@ -46,9 +46,9 @@ final class UnifiedViewportTests: XCTestCase {
         var comments: [LineSelection] = []
         view.onComment = { comments.append($0) }
         for (row, side, number) in [(1, DiffSide.old, 1), (2, .old, 2), (3, .new, 1), (4, .new, 2), (5, .new, 4)] {
-            let point = NSPoint(x: view.sourceTextInset + 6, y: view.table.rect(ofRow: row).minY + 8)
+            let point = NSPoint(x: view.sourceTextInset(file: 0) + 6, y: view.table.rect(ofRow: row).minY + 8)
             XCTAssertTrue(view.hitsCode(row: row, point: point))
-            XCTAssertFalse(view.hitsCode(row: row, point: NSPoint(x: view.sourceGutter.changeLeading + 3, y: point.y)),
+            XCTAssertFalse(view.hitsCode(row: row, point: NSPoint(x: view.sourceGutter(file: 0).changeLeading + 3, y: point.y)),
                            "The change-sign column is not source text")
             XCTAssertFalse(view.hitsCode(row: row, point: NSPoint(x: 900, y: point.y)), "Trailing space is not code")
             view.click(row: row, point: point, shift: false)
@@ -56,20 +56,20 @@ final class UnifiedViewportTests: XCTestCase {
             XCTAssertEqual(comments.last?.side, side)
             XCTAssertEqual(comments.last?.start, number)
         }
-        view.commentRange = { _, side, line in
-            if side == .old && line == 3 { return 3...3 }
-            if side == .new && line == 4 { return 4...4 }
-            return nil
-        }
-        for (x, side, line) in [(CGFloat(12), DiffSide.old, 3), (56, .new, 4)] {
-            let point = NSPoint(x: x, y: view.table.rect(ofRow: 5).minY + 8)
+        view.setComments([
+            ReviewComment(path: "code.swift", side: .old, startLine: 3, endLine: 3, text: "old", fingerprint: "code.swift"),
+            ReviewComment(path: "code.swift", side: .new, startLine: 4, endLine: 4, text: "new", fingerprint: "code.swift")
+        ])
+        for (side, line) in [(DiffSide.old, 3), (.new, 4)] {
+            let marker = try XCTUnwrap(view.commentMarkerRect(file: 0, side: side))
+            let point = NSPoint(x: marker.midX, y: view.table.rect(ofRow: 5).minY + 8)
             XCTAssertTrue(view.hitsCode(row: 5, point: point))
             view.click(row: 5, point: point, shift: false)
             view.commitSelection()
             XCTAssertEqual(comments.last?.side, side)
             XCTAssertEqual(comments.last?.start, line)
         }
-        view.click(row: 1, point: NSPoint(x: view.sourceTextInset + 6, y: 46), shift: false)
+        view.click(row: 1, point: NSPoint(x: view.sourceTextInset(file: 0) + 6, y: 46), shift: false)
         let anchor = try XCTUnwrap(view.selection)
         view.drag(row: 2, point: .zero, anchor: anchor)
         XCTAssertEqual(view.selection?.end, 2)
@@ -97,8 +97,8 @@ final class UnifiedViewportTests: XCTestCase {
         XCTAssertEqual(view.table.rect(ofRow: 2).height, Style.rowHeight, "Hidden counterpart must not inflate unified rows")
         XCTAssertEqual(view.horizontalOffset(file: 0, side: .old), 0)
         let y = view.table.rect(ofRow: 1).maxY - Style.rowHeight + 4
-        XCTAssertTrue(view.hitsCode(row: 1, point: NSPoint(x: view.sourceTextInset + 6, y: y)))
-        view.click(row: 1, point: NSPoint(x: view.sourceTextInset + 6, y: y), shift: false)
+        XCTAssertTrue(view.hitsCode(row: 1, point: NSPoint(x: view.sourceTextInset(file: 0) + 6, y: y)))
+        view.click(row: 1, point: NSPoint(x: view.sourceTextInset(file: 0) + 6, y: y), shift: false)
         XCTAssertEqual(view.selection?.start, 1)
     }
 
@@ -288,24 +288,24 @@ final class UnifiedViewportTests: XCTestCase {
     }
 
     @MainActor
-    func testUnifiedContextRendersBothCommentMarkersInTheirOriginalGutters() async throws {
+    func testUnifiedContextRendersBothCommentMarkersAtRightEdge() async throws {
         let (view, window) = makeView([changedFile()])
         defer { window.orderOut(nil) }
         window.appearance = NSAppearance(named: .darkAqua)
-        view.commentRange = { _, side, line in
-            if side == .old && line == 3 { return 3...3 }
-            if side == .new && line == 4 { return 4...4 }
-            return nil
-        }
+        view.setComments([
+            ReviewComment(path: "code.swift", side: .old, startLine: 3, endLine: 3, text: "old", fingerprint: "code.swift"),
+            ReviewComment(path: "code.swift", side: .new, startLine: 4, endLine: 4, text: "new", fingerprint: "code.swift")
+        ])
         try await ready(view)
         let cell = try XCTUnwrap(view.table.view(atColumn: 0, row: 5, makeIfNecessary: true) as? DiffCell)
-        let image = NSImage(size: NSSize(width: 100, height: cell.bounds.height), flipped: true) { _ in
+        let image = NSImage(size: NSSize(width: 48, height: cell.bounds.height), flipped: true) { _ in
+            NSGraphicsContext.current?.cgContext.translateBy(x: -cell.bounds.width + 48, y: 0)
             view.effectiveAppearance.performAsCurrentDrawingAppearance { cell.draw(cell.bounds) }
             return true
         }
         let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
-        let scale = CGFloat(bitmap.pixelsWide) / 100
-        for x: CGFloat in [5, 49] {
+        let scale = CGFloat(bitmap.pixelsWide) / 48
+        for x: CGFloat in [5, 29] {
             XCTAssertGreaterThan(try XCTUnwrap(bitmap.colorAt(x: Int(x * scale), y: Int(8 * scale))).alphaComponent, 0)
         }
     }

@@ -106,8 +106,20 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var expandedImports: Set<String> = []
     var filters = ReviewFilters()
     var isReviewed: (FileDiff) -> Bool = { _ in false }
-    var commentCount: (FileDiff) -> Int = { _ in 0 }
-    var commentRange: (String, DiffSide, Int) -> ClosedRange<Int>? = { _, _, _ in nil }
+    private var comments: [String: [DiffSide: [ReviewComment]]] = [:]
+    private var numberWidths: [CGFloat] = []
+
+    func setComments(_ values: [ReviewComment]) {
+        let previous = files.indices.map { [commentRailWidth(file: $0, side: .old), commentRailWidth(file: $0, side: .new)] }
+        comments = Dictionary(grouping: values, by: \.path).mapValues { Dictionary(grouping: $0, by: \.side) }
+        let current = files.indices.map { [commentRailWidth(file: $0, side: .old), commentRailWidth(file: $0, side: .new)] }
+        if previous != current { prepareLayout() }
+        redraw()
+    }
+
+    func commentRange(_ path: String, _ side: DiffSide, _ line: Int) -> ClosedRange<Int>? {
+        comments[path]?[side]?.first { ($0.startLine...$0.endLine).contains(line) }.map { $0.startLine...$0.endLine }
+    }
     var onFocus: ((Int) -> Void)?
     var onComment: ((LineSelection) -> Void)?
     var selection: LineSelection?
@@ -152,9 +164,26 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
     var paneWidth: CGFloat { scroll.contentSize.width / (diffLayout == .split ? 2 : 1) }
-    var sourceGutter: SourceGutter { SourceGutter(layout: diffLayout) }
-    var sourceTextInset: CGFloat { sourceGutter.textLeading }
-    var textWidth: CGFloat { max(1, paneWidth - sourceTextInset - 8) }
+    func sourceGutter(file: Int) -> SourceGutter {
+        SourceGutter(layout: diffLayout, numberWidth: numberWidths[file])
+    }
+    func sourceTextInset(file: Int) -> CGFloat { sourceGutter(file: file).textLeading }
+    private func commentSides(file: Int, side: DiffSide) -> [DiffSide] {
+        let sides: [DiffSide] = diffLayout == .split ? [side] : [.old, .new]
+        return sides.filter { comments[files[file].path]?[$0] != nil }
+    }
+    func commentRailWidth(file: Int, side: DiffSide) -> CGFloat {
+        CGFloat(commentSides(file: file, side: side).count) * 24
+    }
+    /// Pane-local marker bounds. Unified context retains independent old/new targets.
+    func commentMarkerRect(file: Int, side: DiffSide) -> NSRect? {
+        let sides = commentSides(file: file, side: side)
+        guard let index = sides.firstIndex(of: side) else { return nil }
+        return NSRect(x: paneWidth - CGFloat(sides.count - index) * 24 + 4, y: 3, width: 16, height: 16)
+    }
+    func textWidth(file: Int, side: DiffSide) -> CGFloat {
+        max(1, paneWidth - sourceTextInset(file: file) - 8 - commentRailWidth(file: file, side: side))
+    }
     private let highlights = NSCache<NSString, HighlightBox>()
     private let lineBreaks = NSCache<NSString, DiffTextLayout.Breaks>()
     private var highlightTask: Task<Void, Never>?
@@ -250,6 +279,10 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         highlightTask?.cancel()
         highlightTask = nil
         self.files = files; self.presentations = presentations
+        numberWidths = files.map { file in
+            let maximum = file.hunks.lazy.flatMap(\.lines).reduce(1) { max($0, $1.oldNumber ?? 0, $1.newNumber ?? 0) }
+            return SourceGutter.numberWidth(for: maximum)
+        }
         markdownSourcePaths.removeAll()
         highlights.removeAllObjects(); failedHighlights.removeAll()
         markdownTask?.cancel(); markdownTask = nil
@@ -376,7 +409,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
                let line = side == .old ? pair.old : pair.new else { return }
             let text = NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    "),
                                           attributes: [.font: Style.codeFont])
-            let fragments = textFragments(text)
+            let fragments = textFragments(text, file: file, side: side)
             let fragment = fragments.firstIndex { NSIntersectionRange($0, match.range).length > 0 } ?? 0
             rect = table.rect(ofRow: row)
             rect.origin.y += CGFloat(fragment) * Style.rowHeight
@@ -519,8 +552,9 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let value = highlights.object(forKey: highlightKey(file, page: max(0, line - 1) / SyntaxService.pageSize))?.value
         return side == .old ? value?.old[line] : value?.new[line]
     }
-    func textFragments(_ text: NSAttributedString) -> [NSRange] {
+    func textFragments(_ text: NSAttributedString, file: Int, side: DiffSide) -> [NSRange] {
         guard softWrap else { return [NSRange(location: 0, length: text.length)] }
+        let textWidth = textWidth(file: file, side: side)
         let key = "\(textWidth):\(text.string)" as NSString
         if let cached = lineBreaks.object(forKey: key) { return cached.ranges }
         let ranges = DiffTextLayout.ranges(text, width: textWidth)
@@ -653,12 +687,16 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let file = files[rows[row].file]
         let origin: CGFloat = diffLayout == .unified || side == .old ? 0 : table.bounds.width / 2
         let localX = point.x - origin
-        let markerX = sourceGutter.commentLeading(side)
-        if localX >= markerX && localX <= markerX + SourceGutter.commentWidth && commentRange(file.path, side, number) != nil { return true }
-        guard localX >= sourceTextInset - 6, !line.text.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        let index = rows[row].file
+        if let marker = commentMarkerRect(file: index, side: side),
+           localX >= marker.minX && localX <= marker.maxX && commentRange(file.path, side, number) != nil { return true }
+        let sourceTextInset = sourceTextInset(file: index)
+        guard localX >= sourceTextInset,
+              localX < sourceTextInset + textWidth(file: index, side: side),
+              !line.text.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         let rich = richText(file: file, side: side, line: number) ??
             NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    "), attributes: [.font: Style.codeFont])
-        let fragments = textFragments(rich)
+        let fragments = textFragments(rich, file: index, side: side)
         let fragmentIndex = Int((point.y - table.rect(ofRow: row).minY) / Style.rowHeight)
         guard fragments.indices.contains(fragmentIndex) else { return false }
         let fragment = fragments[fragmentIndex]
@@ -673,7 +711,9 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
         if case .code(let pair) = rows[row].content,
            pair.new?.kind == .context, pair.old != nil {
-            return x < sourceGutter.commentLeading(.new) ? .old : .new
+            if let marker = commentMarkerRect(file: rows[row].file, side: .old),
+               x >= marker.minX && x <= marker.maxX { return .old }
+            return .new
         }
         return rows[row].sourceSide ?? .new
     }
@@ -734,7 +774,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         guard !softWrap, files.indices.contains(file), !rendersMarkdown(files[file]),
               let value = horizontalMetrics[files[file].path] else { return 0 }
         let width = diffLayout == .unified ? max(value.oldWidth, value.newWidth) : side == .old ? value.oldWidth : value.newWidth
-        return max(0, width - textWidth)
+        return max(0, width - textWidth(file: file, side: side))
     }
     func scrollHorizontally(_ delta: CGFloat, file: Int, side: DiffSide) {
         guard files.indices.contains(file) else { return }
@@ -750,7 +790,10 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private func prepareLayout() {
         layoutTask?.cancel()
         measuredPaneWidth = paneWidth
-        let snapshot = rows, paths = files.map(\.path), width: CGFloat? = softWrap ? textWidth : nil
+        let snapshot = rows, paths = files.map(\.path)
+        let wrapWidths: [[DiffSide: CGFloat]]? = softWrap ? files.indices.map {
+            [.old: textWidth(file: $0, side: .old), .new: textWidth(file: $0, side: .new)]
+        } : nil
         let font = Style.codeFont, lineHeight = Style.rowHeight
         isLayoutPending = true
         let worker = Task.detached(priority: .userInitiated) { () -> ([CGFloat], [Int: FileHorizontalMetrics])? in
@@ -765,14 +808,14 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
                         guard let line else { continue }
                         autoreleasepool {
                             let text = NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    "), attributes: [.font: font])
-                            if width == nil {
+                            if let width = wrapWidths?[row.file][side] {
+                                height = max(height, CGFloat(DiffTextLayout.ranges(text, width: width).count) * lineHeight)
+                            } else {
                                 let measured = DiffTextLayout.width(text)
                                 var value = widths[row.file] ?? FileHorizontalMetrics()
                                 if side == .old { value.oldWidth = max(value.oldWidth, measured) }
                                 else { value.newWidth = max(value.newWidth, measured) }
                                 widths[row.file] = value
-                            } else {
-                                height = max(height, CGFloat(DiffTextLayout.ranges(text, width: width).count) * lineHeight)
                             }
                         }
                     }
@@ -799,7 +842,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             })
             self.preservingScrollAnchor {
                 self.rowHeights = result.0
-                if width == nil {
+                if wrapWidths == nil {
                     for (file, measured) in result.1 {
                         var value = self.horizontalMetrics[paths[file]] ?? FileHorizontalMetrics()
                         value.oldWidth = measured.oldWidth
@@ -1108,11 +1151,12 @@ final class DiffCell: NSView {
         let text = line.text.replacingOccurrences(of: "\t", with: "    ")
         let rich = owner.richText(file: file, side: side, line: number) ?? NSAttributedString(string: text, attributes: [.font: Style.codeFont, .foregroundColor: NSColor.labelColor])
         NSGraphicsContext.saveGraphicsState()
-        let inset = owner.sourceTextInset
-        NSRect(x: rect.minX + inset - 6, y: 0, width: max(0, rect.width - inset + 6), height: rect.height).clip()
+        let inset = owner.sourceTextInset(file: fileIndex)
+        let textWidth = owner.textWidth(file: fileIndex, side: side)
+        NSRect(x: rect.minX + inset, y: 0, width: textWidth, height: rect.height).clip()
         let x = rect.minX + inset - owner.horizontalOffset(file: fileIndex, side: side)
         let typesetter = CTTypesetterCreateWithAttributedString(rich)
-        let ranges = owner.textFragments(rich)
+        let ranges = owner.textFragments(rich, file: fileIndex, side: side)
         for (index, fragment) in ranges.enumerated() {
             let y = CGFloat(index) * Style.rowHeight
             guard NSRect(x: rect.minX, y: y, width: rect.width, height: Style.rowHeight).intersects(visibleRect) else { continue }
@@ -1128,7 +1172,7 @@ final class DiffCell: NSView {
             if !owner.searchQuery.isEmpty {
                 let margin = owner.searchQuery.utf16.count
                 let leftIndex = CTLineGetStringIndexForPosition(ct, CGPoint(x: rect.minX + inset - 6 - x, y: 0))
-                let rightIndex = CTLineGetStringIndexForPosition(ct, CGPoint(x: rect.maxX - x, y: 0))
+                let rightIndex = CTLineGetStringIndexForPosition(ct, CGPoint(x: rect.minX + inset + textWidth - x, y: 0))
                 let start = max(0, (leftIndex == kCFNotFound ? fragment.location : leftIndex) - margin)
                 let end = min(rich.length, (rightIndex == kCFNotFound ? NSMaxRange(fragment) : rightIndex) + margin)
                 for found in LiteralSearch.matches(owner.searchQuery, in: text, range: NSRange(location: start, length: end - start)) {
@@ -1157,37 +1201,39 @@ final class DiffCell: NSView {
         NSGraphicsContext.restoreGraphicsState()
         if owner.diffLayout == .unified {
             if let number = line.oldNumber {
-                drawGutter(number: number, side: .old, file: file, rect: rect, owner: owner)
+                drawGutter(number: number, side: .old, file: file, fileIndex: fileIndex, rect: rect, owner: owner)
             }
             if let number = line.newNumber {
-                drawGutter(number: number, side: .new, file: file,
-                           rect: rect.offsetBy(dx: owner.sourceGutter.columnOffset(.new), dy: 0), owner: owner)
+                drawGutter(number: number, side: .new, file: file, fileIndex: fileIndex, rect: rect, owner: owner)
             }
         } else {
-            drawGutter(number: number, side: side, file: file, rect: rect, owner: owner)
+            drawGutter(number: number, side: side, file: file, fileIndex: fileIndex, rect: rect, owner: owner)
         }
         let marker = line.kind == .addition ? "+" : line.kind == .deletion ? "−" : ""
-        draw(marker, at: NSPoint(x: rect.minX + owner.sourceGutter.changeLeading, y: 4),
+        draw(marker, at: NSPoint(x: rect.minX + owner.sourceGutter(file: fileIndex).changeLeading, y: 4),
              font: Style.smallFont, color: line.kind == .deletion ? .systemRed : .systemGreen)
     }
-    private func drawGutter(number: Int, side: DiffSide, file: FileDiff, rect: NSRect, owner: DiffViewport) {
-        if let range = owner.commentRange(file.path, side, number) {
+    private func drawGutter(number: Int, side: DiffSide, file: FileDiff, fileIndex: Int, rect: NSRect, owner: DiffViewport) {
+        if let range = owner.commentRange(file.path, side, number),
+           let marker = owner.commentMarkerRect(file: fileIndex, side: side) {
+            let marker = marker.offsetBy(dx: rect.minX, dy: 0)
             if number == range.lowerBound {
-                Icons.draw("message-square", in: NSRect(x: rect.minX + SourceGutter.commentLeading, y: 3, width: 16, height: 16), color: .labelColor)
+                Icons.draw("message-square", in: marker, color: .labelColor)
             }
             if range.lowerBound != range.upperBound {
                 let start: CGFloat = number == range.lowerBound ? 19 : 0
                 let end: CGFloat = number == range.upperBound ? rect.height - Style.rowHeight / 2 : rect.height
                 NSColor.secondaryLabelColor.setFill()
-                NSRect(x: rect.minX + 11.5, y: start, width: 1, height: max(0, end - start)).fill()
+                NSRect(x: marker.midX - 0.5, y: start, width: 1, height: max(0, end - start)).fill()
                 if number == range.upperBound {
-                    NSRect(x: rect.minX + 11.5, y: end - 0.5, width: 6, height: 1).fill()
+                    NSRect(x: marker.midX - 6, y: end - 0.5, width: 6, height: 1).fill()
                 }
             }
         }
         let numberString = "\(number)" as NSString
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular), .foregroundColor: NSColor.tertiaryLabelColor]
-        numberString.draw(at: NSPoint(x: rect.minX + SourceGutter.numberTrailing - numberString.size(withAttributes: attrs).width, y: 5), withAttributes: attrs)
+        let attrs: [NSAttributedString.Key: Any] = [.font: SourceGutter.numberFont, .foregroundColor: NSColor.tertiaryLabelColor]
+        let gutter = owner.sourceGutter(file: fileIndex)
+        numberString.draw(at: NSPoint(x: rect.minX + gutter.columnOffset(side) + gutter.numberTrailing - numberString.size(withAttributes: attrs).width, y: 5), withAttributes: attrs)
     }
     private func draw(_ text: String, at point: NSPoint, font: NSFont, color: NSColor, maxWidth: CGFloat? = nil) {
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingMiddle

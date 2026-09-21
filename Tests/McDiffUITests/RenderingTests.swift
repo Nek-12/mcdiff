@@ -107,12 +107,12 @@ final class RenderingTests: XCTestCase {
         let y = viewport.table.rect(ofRow: 1).minY + 8
         let half = viewport.table.bounds.width / 2
         XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: 80, y: y)))
-        XCTAssertTrue(viewport.hitsCode(row: 1, point: NSPoint(x: half + viewport.sourceTextInset + 5, y: y)))
-        XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: half + viewport.sourceGutter.changeLeading + 3, y: y)))
+        XCTAssertTrue(viewport.hitsCode(row: 1, point: NSPoint(x: half + viewport.sourceTextInset(file: 0) + 5, y: y)))
+        XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: half + viewport.sourceGutter(file: 0).changeLeading + 3, y: y)))
         XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: half + 300, y: y)))
         XCTAssertFalse(viewport.hitsCode(row: 1, point: NSPoint(x: half + 10, y: y)))
-        viewport.commentRange = { _, side, line in side == .new && line == 1 ? 1...1 : nil }
-        XCTAssertTrue(viewport.hitsCode(row: 1, point: NSPoint(x: half + 10, y: y)))
+        viewport.setComments([ReviewComment(path: file.path, side: .new, startLine: 1, endLine: 1, text: "Review", fingerprint: file.fingerprint)])
+        XCTAssertTrue(viewport.hitsCode(row: 1, point: NSPoint(x: viewport.table.bounds.width - 12, y: y)))
     }
 
     @MainActor

@@ -28,19 +28,33 @@ final class SourceGutterTests: XCTestCase {
             XCTAssertFalse(view.isLayoutPending)
             view.layoutSubtreeIfNeeded()
             for hasComments in [false, true] {
-                view.commentRange = { _, _, line in hasComments ? line...line : nil }
+                view.setComments(hasComments ? [
+                    ReviewComment(path: file.path, side: .old, startLine: 103, endLine: 103, text: "Old", fingerprint: file.fingerprint),
+                    ReviewComment(path: file.path, side: .new, startLine: 104, endLine: 104, text: "New", fingerprint: file.fingerprint)
+                ] : [])
                 let oldCell = try XCTUnwrap(view.table.view(atColumn: 0, row: 1, makeIfNecessary: true) as? DiffCell)
                 let newCell = layout == .split ? oldCell :
                     try XCTUnwrap(view.table.view(atColumn: 0, row: 2, makeIfNecessary: true) as? DiffCell)
                 let old = try signBounds(oldCell, side: .old, layout: layout)
                 let new = try signBounds(newCell, side: .new, layout: layout)
-                let numbersRight: CGFloat = layout == .split ? 47 : 91
+                let gutter = view.sourceGutter(file: 0)
+                let numbersRight = gutter.numberTrailing + gutter.columnOffset(.new)
                 XCTAssertGreaterThan(old.minX, numbersRight, "Deletion sign must follow every line-number column")
                 XCTAssertGreaterThan(new.minX, numbersRight, "Addition sign must follow every line-number column")
-                XCTAssertLessThan(old.maxX, view.sourceTextInset - 6)
-                XCTAssertLessThan(new.maxX, view.sourceTextInset - 6)
+                XCTAssertLessThan(old.maxX, gutter.textLeading - 6)
+                XCTAssertLessThan(new.maxX, gutter.textLeading - 6)
                 XCTAssertEqual(old.minX, new.minX, accuracy: 1, "Signs must align regardless of original side")
             }
+        }
+    }
+
+    @MainActor
+    func testNumbersStartWithoutLeadingSpaceAndHaveHalfTheFormerGap() {
+        for number in [8, 105, 30_050, 123_456] {
+            let glyphWidth = ("\(number)" as NSString).size(withAttributes: [.font: SourceGutter.numberFont]).width
+            let gutter = SourceGutter(layout: .unified, numberWidth: SourceGutter.numberWidth(for: number))
+            XCTAssertEqual(gutter.numberTrailing - glyphWidth, 0, accuracy: 1, "Only glyph rounding may precede the widest number")
+            XCTAssertEqual(gutter.columnOffset(.new) - gutter.numberTrailing, 13, "Halve the prior 26pt gap")
         }
     }
 

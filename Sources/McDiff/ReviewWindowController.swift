@@ -351,7 +351,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         home.onResume = { [weak self] in self?.resumeReview() }
         home.onAuthenticationRequired = { [weak self] in self?.setAccount(.signedOut) }
         diff.isReviewed = { [weak self] in self?.isReviewed($0) ?? false }
-        diff.commentCount = { [weak self] file in self?.progress.comments.filter { $0.path == file.path }.count ?? 0 }
         diff.onFocus = { [weak self] in self?.focus($0) }
         diff.onComment = { [weak self] in self?.editComment(selection: $0) }
         diff.onSearchResults = { [weak self] indices, count in
@@ -362,10 +361,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         }
         diff.onSearchBusy = { [weak self] searching in
             self?.setActivity(.search, active: searching)
-        }
-        diff.commentRange = { [weak self] path, side, number in
-            self?.progress.comments.first { $0.path == path && $0.side == side && ($0.startLine...$0.endLine).contains(number) }
-                .map { $0.startLine...$0.endLine }
         }
         diff.onHighlightError = { [weak self] error in self?.showError(error, title: "Could not highlight code") }
         diff.onLayoutBusy = { [weak self] busy in
@@ -474,6 +469,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 self.diff.filters = self.preferences.filters
                 self.diff.markdownContent = result.3
                 self.searchMatchingFiles = nil
+                self.diff.setComments(self.progress.comments)
                 self.diff.setFiles(self.files, presentations: self.presentations)
                 self.rebuildSidebar()
                 self.updateComparisonPresentation()
@@ -701,7 +697,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let prior = progress
         do { try change(&progress); try saveProgress() }
         catch { progress = prior; throw error }
-        diff.redraw(); sidebar.reloadData(); updateActions()
+        diff.setComments(progress.comments); sidebar.reloadData(); updateActions()
     }
     @objc private func commentOnSelection() { if let selection = diff.selection { editComment(selection: selection) } }
     @objc private func showComments(_ sender: Any?) {

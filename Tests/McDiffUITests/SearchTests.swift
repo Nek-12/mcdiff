@@ -179,7 +179,7 @@ final class SearchTests: XCTestCase {
         try await ready(view)
         XCTAssertEqual(view.horizontalOffset(file: 0, side: .new), 0)
         let rich = NSAttributedString(string: text, attributes: [.font: Style.codeFont])
-        let fragment = try XCTUnwrap(view.textFragments(rich).firstIndex { NSIntersectionRange($0, match.range).length > 0 })
+        let fragment = try XCTUnwrap(view.textFragments(rich, file: 0, side: .new).firstIndex { NSIntersectionRange($0, match.range).length > 0 })
         let y = view.table.rect(ofRow: 1).minY + CGFloat(fragment) * Style.rowHeight
         XCTAssertTrue(view.scroll.documentVisibleRect.contains(NSPoint(x: 600, y: y)))
 

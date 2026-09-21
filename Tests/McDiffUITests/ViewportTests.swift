@@ -81,7 +81,7 @@ final class ViewportTests: XCTestCase {
         XCTAssertEqual(view.horizontalOffset(file: 0, side: .new), 100)
         view.scrollHorizontally(.greatestFiniteMagnitude, file: 0, side: .old)
         let measured = DiffTextLayout.width(NSAttributedString(string: old, attributes: [.font: Style.codeFont]))
-        XCTAssertEqual(view.horizontalOffset(file: 0, side: .old) + view.textWidth, measured, accuracy: 1)
+        XCTAssertEqual(view.horizontalOffset(file: 0, side: .old) + view.textWidth(file: 0, side: .old), measured, accuracy: 1)
         XCTAssertGreaterThan(view.horizontalOffset(file: 0, side: .old), 20000)
         view.scroll.contentView.scroll(to: NSPoint(x: 80, y: 0))
         XCTAssertEqual(view.scroll.contentView.bounds.minX, 0)
@@ -172,7 +172,7 @@ final class ViewportTests: XCTestCase {
         view.softWrap = true
         try await ready(view)
         let rich = NSAttributedString(string: text, attributes: [.font: Style.codeFont])
-        let ranges = DiffTextLayout.ranges(rich, width: view.textWidth)
+        let ranges = DiffTextLayout.ranges(rich, width: view.textWidth(file: 0, side: .old))
         XCTAssertGreaterThan(ranges.count, 1)
         XCTAssertEqual(ranges.map { (text as NSString).substring(with: $0) }.joined(), text)
         for range in ranges {

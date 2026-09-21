@@ -85,6 +85,7 @@ public enum DiffPresentation {
         // safe candidates for folding source-looking text.
         guard !lines.contains(where: { $0.text.contains("\"\"\"") || $0.text.contains("'''") || $0.text.contains("`") || $0.text.contains("/*") || $0.text.contains("*/") }) else { return [] }
         var numbers: Set<Int> = [], i = 0
+        var previousImportEnd: Int?
         while i < lines.count {
             guard lines[i].text.utf16.count <= 32_768 else { i += 1; continue }
             var statement = lines[i].text.trimmingCharacters(in: .whitespaces)
@@ -117,7 +118,7 @@ public enum DiffPresentation {
                 if !complete(statement) && (statement.contains("{") || statement.contains("(")) {
                     while end + 1 < lines.count && end - start < 200 && statement.count < 32_768 {
                         let next = lines[end + 1].text.trimmingCharacters(in: .whitespaces)
-                        guard !next.isEmpty, next.utf16.count <= 32_768,
+                        guard next.utf16.count <= 32_768,
                               !next.contains("//"), !next.contains("#"),
                               !next.contains("="), !next.contains(";") || next.hasSuffix(";") else { break }
                         end += 1; statement += "\n" + next
@@ -126,9 +127,16 @@ public enum DiffPresentation {
                     }
                 }
                 if complete(statement) {
-                    for line in lines[start...end] {
+                    var foldStart = start
+                    if let previousImportEnd,
+                       lines[(previousImportEnd + 1)..<start].allSatisfy({ $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                        // Whitespace belongs to the fold only when imports bound it on both sides.
+                        foldStart = previousImportEnd + 1
+                    }
+                    for line in lines[foldStart...end] {
                         if let number = side == .old ? line.oldNumber : line.newNumber { numbers.insert(number) }
                     }
+                    previousImportEnd = end
                     i = end + 1; continue
                 }
             }
