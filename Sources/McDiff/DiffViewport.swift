@@ -152,7 +152,8 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
     var paneWidth: CGFloat { scroll.contentSize.width / (diffLayout == .split ? 2 : 1) }
-    var sourceTextInset: CGFloat { diffLayout == .split ? 60 : 104 }
+    var sourceGutter: SourceGutter { SourceGutter(layout: diffLayout) }
+    var sourceTextInset: CGFloat { sourceGutter.textLeading }
     var textWidth: CGFloat { max(1, paneWidth - sourceTextInset - 8) }
     private let highlights = NSCache<NSString, HighlightBox>()
     private let lineBreaks = NSCache<NSString, DiffTextLayout.Breaks>()
@@ -652,8 +653,8 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let file = files[rows[row].file]
         let origin: CGFloat = diffLayout == .unified || side == .old ? 0 : table.bounds.width / 2
         let localX = point.x - origin
-        let markerX: CGFloat = diffLayout == .unified && side == .new ? 48 : 4
-        if localX >= markerX && localX <= markerX + 18 && commentRange(file.path, side, number) != nil { return true }
+        let markerX = sourceGutter.commentLeading(side)
+        if localX >= markerX && localX <= markerX + SourceGutter.commentWidth && commentRange(file.path, side, number) != nil { return true }
         guard localX >= sourceTextInset - 6, !line.text.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         let rich = richText(file: file, side: side, line: number) ??
             NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    "), attributes: [.font: Style.codeFont])
@@ -672,7 +673,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
         if case .code(let pair) = rows[row].content,
            pair.new?.kind == .context, pair.old != nil {
-            return x < 48 ? .old : .new
+            return x < sourceGutter.commentLeading(.new) ? .old : .new
         }
         return rows[row].sourceSide ?? .new
     }
@@ -1156,20 +1157,23 @@ final class DiffCell: NSView {
         NSGraphicsContext.restoreGraphicsState()
         if owner.diffLayout == .unified {
             if let number = line.oldNumber {
-                drawGutter(line, number: number, side: .old, file: file, rect: rect, owner: owner)
+                drawGutter(number: number, side: .old, file: file, rect: rect, owner: owner)
             }
             if let number = line.newNumber {
-                drawGutter(line, number: number, side: .new, file: file, rect: rect.offsetBy(dx: 44, dy: 0), owner: owner)
+                drawGutter(number: number, side: .new, file: file,
+                           rect: rect.offsetBy(dx: owner.sourceGutter.columnOffset(.new), dy: 0), owner: owner)
             }
         } else {
-            drawGutter(line, number: number, side: side, file: file, rect: rect, owner: owner)
+            drawGutter(number: number, side: side, file: file, rect: rect, owner: owner)
         }
-    }
-    private func drawGutter(_ line: DiffLine, number: Int, side: DiffSide, file: FileDiff, rect: NSRect, owner: DiffViewport) {
         let marker = line.kind == .addition ? "+" : line.kind == .deletion ? "−" : ""
+        draw(marker, at: NSPoint(x: rect.minX + owner.sourceGutter.changeLeading, y: 4),
+             font: Style.smallFont, color: line.kind == .deletion ? .systemRed : .systemGreen)
+    }
+    private func drawGutter(number: Int, side: DiffSide, file: FileDiff, rect: NSRect, owner: DiffViewport) {
         if let range = owner.commentRange(file.path, side, number) {
             if number == range.lowerBound {
-                Icons.draw("message-square", in: NSRect(x: rect.minX + 4, y: 3, width: 16, height: 16), color: .labelColor)
+                Icons.draw("message-square", in: NSRect(x: rect.minX + SourceGutter.commentLeading, y: 3, width: 16, height: 16), color: .labelColor)
             }
             if range.lowerBound != range.upperBound {
                 let start: CGFloat = number == range.lowerBound ? 19 : 0
@@ -1180,12 +1184,10 @@ final class DiffCell: NSView {
                     NSRect(x: rect.minX + 11.5, y: end - 0.5, width: 6, height: 1).fill()
                 }
             }
-        } else {
-            draw(marker, at: NSPoint(x: rect.minX + 5, y: 4), font: Style.smallFont, color: side == .old ? .systemRed : .systemGreen)
         }
         let numberString = "\(number)" as NSString
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular), .foregroundColor: NSColor.tertiaryLabelColor]
-        numberString.draw(at: NSPoint(x: rect.minX + 47 - numberString.size(withAttributes: attrs).width, y: 5), withAttributes: attrs)
+        numberString.draw(at: NSPoint(x: rect.minX + SourceGutter.numberTrailing - numberString.size(withAttributes: attrs).width, y: 5), withAttributes: attrs)
     }
     private func draw(_ text: String, at point: NSPoint, font: NSFont, color: NSColor, maxWidth: CGFloat? = nil) {
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingMiddle
