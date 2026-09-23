@@ -84,6 +84,12 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let end = headerRows[index + 1] ?? (rows.count - 1)
         replaceRows(in: header..<end, with: fileRows(at: index), preserving: header)
     }
+    func setExpanded(_ value: Bool, file index: Int) {
+        let path = files[index].path
+        guard expanded.contains(path) != value else { return }
+        if value { expanded.insert(path) } else { expanded.remove(path) }
+        replaceFileRows(at: index)
+    }
     private func replaceRows(in range: Range<Int>, with replacement: [CanvasRow], preserving anchor: Int) {
         stopNavigation()
         Style.animateStateChange(scroll.contentView)
@@ -106,6 +112,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var expandedImports: Set<String> = []
     var filters = ReviewFilters()
     var isReviewed: (FileDiff) -> Bool = { _ in false }
+    var onReviewToggle: ((FileDiff, Bool) -> Void)?
     private var comments: [String: [DiffSide: [ReviewComment]]] = [:]
     private var numberWidths: [CGFloat] = []
 
@@ -563,7 +570,13 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
     private func highlightKey(_ file: FileDiff, page: Int) -> NSString { "\(file.fingerprint):\(Style.dark):\(page)" as NSString }
     func redraw() {
-        table.enumerateAvailableRowViews { row, _ in row.needsDisplay = true; row.subviews.forEach { $0.needsDisplay = true } }
+        table.enumerateAvailableRowViews { row, _ in
+            row.needsDisplay = true
+            row.subviews.forEach {
+                ($0 as? DiffCell)?.updateHeaderButton()
+                $0.needsDisplay = true
+            }
+        }
     }
     private func visibleChanged() {
         let range = table.rows(in: scroll.documentVisibleRect)
@@ -723,9 +736,8 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let item = rows[row], file = files[item.file]
         switch item.content {
         case .file:
-            if expanded.contains(file.path) { expanded.remove(file.path) } else { expanded.insert(file.path) }
             focusedFile = item.file
-            replaceFileRows(at: item.file)
+            setExpanded(!expanded.contains(file.path), file: item.file)
             onFocus?(item.file)
         case .imports(let pairs, let block):
             let key = importKey(file.path, block)
@@ -1002,6 +1014,7 @@ final class DiffCell: NSView {
     weak var owner: DiffViewport?
     var rowIndex = 0
     private var markdownButton: NSButton?
+    private var reviewCheckbox: AnimatedCheckbox?
     override var isFlipped: Bool { true }
 
 
@@ -1021,9 +1034,20 @@ final class DiffCell: NSView {
         guard let owner, owner.rows.indices.contains(rowIndex),
               case .file = owner.rows[rowIndex].content else {
             markdownButton?.isHidden = true
+            reviewCheckbox?.isHidden = true
             return
         }
         let file = owner.files[owner.rows[rowIndex].file]
+        if reviewCheckbox == nil {
+            let check = AnimatedCheckbox(checkboxWithTitle: "", target: self, action: #selector(toggleReviewed))
+            check.controlSize = .small
+            check.setFrameSize(NSSize(width: 15, height: 15))
+            addSubview(check)
+            reviewCheckbox = check
+        }
+        reviewCheckbox?.isHidden = false
+        reviewCheckbox?.configureReview(reviewed: owner.isReviewed(file), reason: owner.filters.skipReason(for: file))
+        needsLayout = true
         guard !file.isBinary, RenderedMarkdown.accepts(file.path) else {
             markdownButton?.isHidden = true
             return
@@ -1045,10 +1069,20 @@ final class DiffCell: NSView {
 
     override func layout() {
         super.layout()
+        if let check = reviewCheckbox, !check.isHidden {
+            check.setFrameOrigin(NSPoint(x: max(0, bounds.width - 12 - check.frame.width),
+                                         y: (bounds.height - check.frame.height) / 2))
+        }
         if let button = markdownButton, !button.isHidden {
-            button.setFrameOrigin(NSPoint(x: max(0, bounds.width - 12 - button.frame.width),
+            button.setFrameOrigin(NSPoint(x: max(0, bounds.width - 12 - 15 - 8 - button.frame.width),
                                           y: (bounds.height - button.frame.height) / 2))
         }
+    }
+
+    @objc private func toggleReviewed() {
+        guard let owner, owner.rows.indices.contains(rowIndex), case .file = owner.rows[rowIndex].content,
+              let check = reviewCheckbox else { return }
+        owner.onReviewToggle?(owner.files[owner.rows[rowIndex].file], check.state == .on)
     }
 
     @objc private func toggleMarkdown() {
@@ -1072,7 +1106,7 @@ final class DiffCell: NSView {
             let additions = "+\(file.additions)", deletions = "−\(file.deletions)"
             let addedWidth = (additions as NSString).size(withAttributes: [.font: countFont]).width
             let removedWidth = (deletions as NSString).size(withAttributes: [.font: countFont]).width
-            let buttonWidth = markdownButton.flatMap { $0.isHidden ? nil : $0.frame.width + 12 } ?? 0
+            let buttonWidth = 15 + 12 + (markdownButton.flatMap { $0.isHidden ? nil : $0.frame.width + 8 } ?? 0)
             let available = max(0, width - 12 - buttonWidth - 24 - 10 - addedWidth - 6 - removedWidth)
             let titleWidth = min(available, (title as NSString).size(withAttributes: [.font: titleFont]).width)
             let paragraph = NSMutableParagraphStyle()

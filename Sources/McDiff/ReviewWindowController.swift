@@ -22,6 +22,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var files: [FileDiff] = []
     private var presentations: [String: [PresentedRow]] = [:]
     private var sidebarIndices: [Int] = []
+    private var sidebarNames: [String: String] = [:]
     private var focused = 0
     private var loadTask: Task<Void, Never>?
     private var comparisonSheet: ComparisonSheet?
@@ -352,6 +353,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         home.onResume = { [weak self] in self?.resumeReview() }
         home.onAuthenticationRequired = { [weak self] in self?.setAccount(.signedOut) }
         diff.isReviewed = { [weak self] in self?.isReviewed($0) ?? false }
+        diff.onReviewToggle = { [weak self] file, reviewed in self?.setReviewed(file, reviewed: reviewed) }
         diff.onFocus = { [weak self] in self?.focus($0) }
         diff.onComment = { [weak self] in self?.editComment(selection: $0) }
         diff.onSearchResults = { [weak self] indices, count in
@@ -502,6 +504,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             let a = rank($0), b = rank($1)
             return a == b ? $0.path.localizedStandardCompare($1.path) == .orderedAscending : a < b
         }
+        sidebarNames = SidebarFileNames.labels(for: files.map(\.path))
     }
     private func rank(_ file: FileDiff) -> Int {
         if preferences.filters.skipReason(for: file) == nil, file.category == .production { return 0 }
@@ -638,7 +641,12 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let prior = progress
         if reviewed { progress.reviewed[file.path] = file.fingerprint }
         else { progress.reviewed.removeValue(forKey: file.path) }
-        do { try saveProgress() } catch { progress = prior; showError(error, title: "Could not save review progress") }
+        do {
+            try saveProgress()
+            if let index = files.firstIndex(where: { $0.path == file.path }) {
+                diff.setExpanded(!reviewed, file: index)
+            }
+        } catch { progress = prior; showError(error, title: "Could not save review progress") }
         diff.redraw(); refreshReviewState(); updateActions()
     }
     private func refreshReviewState() {
@@ -647,7 +655,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         for row in visible.location..<NSMaxRange(visible) where sidebarIndices.indices.contains(row) {
             guard let cell = sidebar.view(atColumn: 0, row: row, makeIfNecessary: false) as? FileCell else { continue }
             let file = files[sidebarIndices[row]]
-            cell.configure(file: file, reviewed: isReviewed(file), reason: preferences.filters.skipReason(for: file))
+            cell.configure(file: file, title: sidebarNames[file.path]!, reviewed: isReviewed(file), reason: preferences.filters.skipReason(for: file))
         }
     }
     @objc private func previousFile() { if screen == .review, !busy, focused > 0 { diff.navigate(to: focused - 1) } }
@@ -937,7 +945,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? FileCell ?? FileCell()
         cell.identifier = id
         let file = files[sidebarIndices[row]]
-        cell.configure(file: file, reviewed: isReviewed(file), reason: preferences.filters.skipReason(for: file))
+        cell.configure(file: file, title: sidebarNames[file.path]!, reviewed: isReviewed(file), reason: preferences.filters.skipReason(for: file))
         cell.onToggle = { [weak self] reviewed in self?.setReviewed(file, reviewed: reviewed) }
         return cell
     }
@@ -973,14 +981,12 @@ private final class FileCell: NSTableCellView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     @objc private func toggle() { onToggle?(check.state == .on) }
-    func configure(file: FileDiff, reviewed: Bool, reason: String?) {
+    func configure(file: FileDiff, title: String, reviewed: Bool, reason: String?) {
         if path == file.path, (check.state == .on) != reviewed { Style.animateStateChange(check) }
         path = file.path
-        name.stringValue = (file.path as NSString).lastPathComponent
+        name.stringValue = title
         name.textColor = reviewed ? .secondaryLabelColor : .labelColor
-        check.state = reviewed ? .on : .off
-        check.isEnabled = reason == nil
-        check.toolTip = reason.map { "Automatically reviewed: \($0). Change the corresponding global filter to review manually." } ?? "Mark file as reviewed"
-        toolTip = file.path + (reason.map { "\nAuto-reviewed: \($0)" } ?? "")
+        check.configureReview(reviewed: reviewed, reason: reason)
+        toolTip = title
     }
 }

@@ -141,9 +141,9 @@ final class MarkdownTests: XCTestCase {
             let cell = try XCTUnwrap(view.table.view(atColumn: 0, row: row, makeIfNecessary: true))
             cell.layoutSubtreeIfNeeded()
             let buttons = cell.subviews.compactMap { $0 as? NSButton }.filter { !$0.isHidden }
-            XCTAssertEqual(buttons.count, 1)
-            let button = try XCTUnwrap(buttons.first)
-            XCTAssertEqual(button.frame.maxX, cell.bounds.maxX - 12, accuracy: 1)
+            let button = try XCTUnwrap(buttons.first { !($0 is AnimatedCheckbox) })
+            let checkbox = try XCTUnwrap(buttons.first { $0 is AnimatedCheckbox })
+            XCTAssertLessThan(button.frame.maxX, checkbox.frame.minX)
             return button
         }
 
@@ -178,7 +178,8 @@ final class MarkdownTests: XCTestCase {
         XCTAssertTrue(view.rendersMarkdown(files[0]))
         XCTAssertTrue(view.rendersMarkdown(files[1]))
         let codeHeader = try XCTUnwrap(view.table.view(atColumn: 0, row: try XCTUnwrap(view.headerRows[2]), makeIfNecessary: true))
-        XCTAssertTrue(codeHeader.subviews.compactMap { $0 as? NSButton }.allSatisfy(\.isHidden))
+        XCTAssertTrue(codeHeader.subviews.compactMap { $0 as? NSButton }
+            .filter { !($0 is AnimatedCheckbox) }.allSatisfy(\.isHidden))
     }
 
     @MainActor
@@ -210,7 +211,8 @@ final class MarkdownTests: XCTestCase {
         for rendered in [false, true] {
             let row = try XCTUnwrap(view.headerRows[1])
             let cell = try XCTUnwrap(view.table.view(atColumn: 0, row: row, makeIfNecessary: true))
-            let button = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSButton }.first { !$0.isHidden })
+            let button = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSButton }
+                .first { !$0.isHidden && !($0 is AnimatedCheckbox) })
             button.performClick(nil)
             XCTAssertEqual(try headerY(), 200, accuracy: 1, "Click must not navigate to the header")
             try await ready(view, file: rendered ? files[1] : nil)

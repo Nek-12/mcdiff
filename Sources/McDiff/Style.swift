@@ -90,6 +90,12 @@ enum Icons {
 }
 
 final class AnimatedCheckbox: NSButton {
+    func configureReview(reviewed: Bool, reason: String?) {
+        state = reviewed ? .on : .off
+        isEnabled = reason == nil
+        toolTip = reason.map { "Automatically reviewed: \($0). Change the corresponding global filter to review manually." }
+            ?? (reviewed ? "Mark file as unreviewed and expand" : "Mark file as reviewed and collapse")
+    }
     override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
         let sent = super.sendAction(action, to: target)
         Style.animateStateChange(self)
