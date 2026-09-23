@@ -51,6 +51,272 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.content(snapshot: snapshot, file: snapshot.files[0], side: .new), "committed\n")
     }
 
+    func testUnchangedSectionsLoadIndividuallyWithOriginalNumbersAndPreservedIdentity() throws {
+        let path = "context \"odd\"\t\n.swift"
+        let original = (1...45).map { "let value\($0) = \($0)\r" }
+        try write(path, original.joined(separator: "\n")) // CRLF, no final LF.
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "context"])
+        var changed = original
+        changed[9] = "let value10 = 100\r"
+        changed.insert("let inserted = true\r", at: 30)
+        try write(path, changed.joined(separator: "\n"))
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == path })
+        XCTAssertEqual(file.hunks.count, 2)
+        let sections = file.unchangedSections
+        XCTAssertEqual(sections.map(\.beforeHunkIndex), [0, 1, 2])
+        XCTAssertEqual(sections.first?.oldStart, 0)
+        XCTAssertNil(sections.last?.count)
+        let fingerprint = file.fingerprint
+        var shownOld = file.hunks.flatMap(\.lines).compactMap(\.oldNumber)
+        var shownNew = file.hunks.flatMap(\.lines).compactMap(\.newNumber)
+        for section in sections {
+            let pairs = try repo.unchangedLines(snapshot: snapshot, file: file, section: section)
+            XCTAssertFalse(pairs.isEmpty)
+            for pair in pairs {
+                let line = try XCTUnwrap(pair.old)
+                XCTAssertEqual(pair.old, pair.new)
+                XCTAssertEqual(line.kind, .context)
+                XCTAssertEqual(line.text, original[try XCTUnwrap(line.oldNumber) - 1])
+                XCTAssertEqual(line.text, changed[try XCTUnwrap(line.newNumber) - 1])
+            }
+            shownOld += pairs.compactMap { $0.old?.oldNumber }
+            shownNew += pairs.compactMap { $0.new?.newNumber }
+        }
+        XCTAssertEqual(shownOld.sorted(), Array(1...original.count))
+        XCTAssertEqual(shownNew.sorted(), Array(1...changed.count))
+        XCTAssertEqual(file.fingerprint, fingerprint)
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "changes"])
+        let committed = try load(base: "HEAD~1", target: "HEAD", mergeBase: false)
+        let committedFile = try XCTUnwrap(committed.files.first { $0.path == path })
+        try write(path, "unrelated live content")
+        XCTAssertFalse(try repo.unchangedLines(snapshot: committed, file: committedFile,
+                                             section: committedFile.unchangedSections[0]).isEmpty)
+    }
+
+    func testUnchangedSectionRejectsLiveEditsInPatchOtherSectionsAndAtEOF() throws {
+        let original = (1...40).map { "line \($0)" }
+        try write("tracked.swift", original.joined(separator: "\n") + "\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "context"])
+        var changed = original
+        changed[15] = "changed line"
+        let source = changed.joined(separator: "\n") + "\n"
+        try write("tracked.swift", source)
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first)
+        let first = try XCTUnwrap(file.unchangedSections.first)
+        for index in [0, 15, 39] {
+            var stale = changed
+            stale[index] = "edited after loading"
+            try write("tracked.swift", stale.joined(separator: "\n") + "\n")
+            XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: first))
+        }
+        for stale in [source + "new trailing line\n", String(source.dropLast()), changed.dropLast().joined(separator: "\n")] {
+            try write("tracked.swift", stale)
+            XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: first))
+        }
+        try write("tracked.swift", source)
+        XCTAssertFalse(try repo.unchangedLines(snapshot: snapshot, file: file, section: first).isEmpty)
+    }
+
+    func testMetadataOnlyRenameExposesWholeFileButAddedDeletedBinaryDoNot() throws {
+        try write("original.swift", "first\nsecond")
+        try Data([0, 1, 2]).write(to: root.appendingPathComponent("binary"))
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "files"])
+        _ = try repo.git(["mv", "original.swift", "renamed.swift"])
+        _ = try repo.git(["rm", "tracked.swift"])
+        try write("added.swift", "addition")
+        try Data([0, 3, 4]).write(to: root.appendingPathComponent("binary"))
+        let snapshot = try load()
+        for file in snapshot.files {
+            if file.path == "renamed.swift" {
+                XCTAssertTrue(file.hunks.isEmpty)
+                let section = try XCTUnwrap(file.unchangedSections.first)
+                XCTAssertEqual(file.unchangedSections.count, 1)
+                XCTAssertEqual(try repo.unchangedLines(snapshot: snapshot, file: file, section: section).compactMap { $0.new?.text },
+                               ["first", "second"])
+            } else {
+                XCTAssertTrue(file.unchangedSections.isEmpty, file.path)
+            }
+        }
+    }
+
+    func testZeroContextInsertionDeletionAndEOFSections() throws {
+        _ = try repo.git(["config", "diff.context", "0"])
+        let original = (1...12).map { "line \($0)" }
+        try write("tracked.swift", original.joined(separator: "\n") + "\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "context"])
+        for changed in [
+            ["first"] + original,
+            Array(original.dropFirst()),
+            Array(original.prefix(5)) + ["inserted"] + original.dropFirst(5),
+            Array(original.prefix(5)) + original.dropFirst(6),
+            original + ["last"],
+            Array(original.dropLast())
+        ] {
+            try write("tracked.swift", changed.joined(separator: "\n") + "\n")
+            let snapshot = try load()
+            let file = try XCTUnwrap(snapshot.files.first)
+            XCTAssertEqual(file.hunks.count, 1)
+            let hunk = try XCTUnwrap(file.hunks.first)
+            XCTAssertTrue(hunk.oldRange?.isEmpty == true || hunk.newRange?.isEmpty == true)
+            var oldNumbers = hunk.lines.compactMap(\.oldNumber)
+            var newNumbers = hunk.lines.compactMap(\.newNumber)
+            for section in file.unchangedSections {
+                let pairs = try repo.unchangedLines(snapshot: snapshot, file: file, section: section)
+                oldNumbers += pairs.compactMap { $0.old?.oldNumber }
+                newNumbers += pairs.compactMap { $0.new?.newNumber }
+            }
+            XCTAssertEqual(oldNumbers.sorted(), Array(1...original.count))
+            XCTAssertEqual(newNumbers.sorted(), Array(1...changed.count))
+        }
+    }
+
+    func testUnchangedSectionDetectsChangedFinalNewlineInsideLastHunk() throws {
+        _ = try repo.git(["config", "core.autocrlf", "false"])
+        let original = (1...15).map { "line \($0)\r" }
+        try write("tracked.swift", original.joined(separator: "\n") + "\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "context"])
+        var changed = original
+        changed[14] = "last changed\r"
+        for ending in ["", "\n"] {
+            let source = changed.joined(separator: "\n")
+            try write("tracked.swift", source + ending)
+            let snapshot = try load()
+            let file = try XCTUnwrap(snapshot.files.first)
+            let first = try XCTUnwrap(file.unchangedSections.first)
+            XCTAssertFalse(try repo.unchangedLines(snapshot: snapshot, file: file, section: first).isEmpty)
+            let last = try XCTUnwrap(file.unchangedSections.last)
+            XCTAssertTrue(try repo.unchangedLines(snapshot: snapshot, file: file, section: last).isEmpty)
+            try write("tracked.swift", source + (ending.isEmpty ? "\n" : ""))
+            XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: first))
+        }
+    }
+
+    func testCrossExtensionRenameFoldsImportsUsingEachOriginalLanguage() throws {
+        // The old-only deletion must still be recognized when the new extension
+        // is not a language that supports folding.
+        try write("original.go", "import \"old\"\n" + (1...30).map { "// line \($0)\n" }.joined())
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "Go source"])
+        _ = try repo.git(["mv", "original.go", "renamed.txt"])
+        try write("renamed.txt", (1...30).map { "// line \($0)\n" }.joined())
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "renamed.txt" })
+        XCTAssertEqual(file.oldPath, "original.go")
+        XCTAssertTrue(DiffPresentation.supportsImportFolding(file))
+        let sources = try XCTUnwrap(repo.contents(snapshot: snapshot, files: [file])[file.path])
+        let folded = DiffPresentation.rows(for: file, oldSource: sources.old, newSource: sources.new).flatMap { row -> [DiffPair] in
+            if case .imports(let pairs) = row { return pairs }; return []
+        }
+        XCTAssertEqual(folded.compactMap { $0.old?.text }, ["import \"old\""])
+    }
+
+    func testUnchangedSectionsUseGitCanonicalLineEndingsWithoutWritingObjectsOrIndex() throws {
+        _ = try repo.git(["config", "core.autocrlf", "input"])
+        let original = (1...20).map { "line \($0)" }
+        try write("tracked.swift", original.joined(separator: "\n") + "\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "canonical LF"])
+        var changed = original
+        changed[14] = "changed 15"
+        let workingSource = changed.joined(separator: "\r\n") + "\r\n"
+        try write("tracked.swift", workingSource)
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "tracked.swift" })
+        let indexBefore = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+        let objectsBefore = try repo.git(["count-objects", "-v"]).text
+        for section in file.unchangedSections {
+            let pairs = try repo.unchangedLines(snapshot: snapshot, file: file, section: section)
+            for pair in pairs {
+                XCTAssertEqual(pair.new?.text, original[try XCTUnwrap(pair.old?.oldNumber) - 1])
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), indexBefore)
+        XCTAssertEqual(try repo.git(["count-objects", "-v"]).text, objectsBefore)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("tracked.swift"), encoding: .utf8), workingSource)
+        changed[0] = "new unreviewed edit"
+        try write("tracked.swift", changed.joined(separator: "\r\n") + "\r\n")
+        XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: file.unchangedSections[0]))
+    }
+
+    func testUnchangedSectionsHonorGitCleanFilters() throws {
+        _ = try repo.git(["config", "filter.upper.clean", "tr a-z A-Z"])
+        try write(".gitattributes", "tracked.swift filter=upper\n")
+        let original = (1...20).map { "line \($0)" }
+        try write("tracked.swift", original.joined(separator: "\n") + "\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "clean filter"])
+        var changed = original
+        changed[14] = "changed 15"
+        try write("tracked.swift", changed.joined(separator: "\n") + "\n")
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "tracked.swift" })
+        let pairs = try repo.unchangedLines(snapshot: snapshot, file: file, section: file.unchangedSections[0])
+        XCTAssertEqual(pairs.first?.new?.text, "LINE 1")
+        changed[0] = "unreviewed"
+        try write("tracked.swift", changed.joined(separator: "\n") + "\n")
+        XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: file.unchangedSections[0]))
+        _ = try repo.git(["config", "filter.upper.clean", "false"])
+        _ = try repo.git(["config", "filter.upper.required", "true"])
+        XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: file.unchangedSections[0])) {
+            XCTAssertTrue($0.localizedDescription.contains("filter"))
+            XCTAssertTrue($0.localizedDescription.contains("failed"))
+        }
+    }
+
+    func testUnchangedSectionsDoNotApplyRegularFileFiltersToSymlinkTargets() throws {
+        _ = try repo.git(["config", "filter.upper.clean", "tr a-z A-Z"])
+        try write(".gitattributes", "*.link filter=upper\n")
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("old.link").path,
+                                                  withDestinationPath: "target-in-lowercase")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "symlink"])
+        _ = try repo.git(["mv", "old.link", "new.link"])
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "new.link" })
+        let pairs = try repo.unchangedLines(snapshot: snapshot, file: file, section: file.unchangedSections[0])
+        XCTAssertEqual(pairs.first?.new?.text, "target-in-lowercase")
+    }
+
+    func testUnchangedSectionsHonorGitWorkingTreeEncoding() throws {
+        try write(".gitattributes", "tracked.swift working-tree-encoding=UTF-16\n")
+        let original = (1...20).map { "line \($0)" }
+        let url = root.appendingPathComponent("tracked.swift")
+        try XCTUnwrap((original.joined(separator: "\n") + "\n").data(using: .utf16)).write(to: url)
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "UTF16 checkout"])
+        var changed = original
+        changed[14] = "changed 15"
+        let data = try XCTUnwrap((changed.joined(separator: "\n") + "\n").data(using: .utf16))
+        try data.write(to: url)
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "tracked.swift" })
+        let pairs = try repo.unchangedLines(snapshot: snapshot, file: file, section: file.unchangedSections[0])
+        XCTAssertEqual(pairs.first?.new?.text, "line 1")
+        XCTAssertEqual(try Data(contentsOf: url), data)
+    }
+
+    func testMetadataOnlyBinaryRenameDoesNotRenderBinaryContent() throws {
+        try Data([0, 1, 2, 3]).write(to: root.appendingPathComponent("old.bin"))
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "binary"])
+        _ = try repo.git(["mv", "old.bin", "new.bin"])
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "new.bin" })
+        for section in file.unchangedSections {
+            XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: section)) {
+                XCTAssertTrue($0.localizedDescription.contains("binary"))
+            }
+        }
+    }
+
     func testBatchSourceContextFoldsPartialGoImportsInWorktreeAndRevisions() throws {
         let path = "imports \"odd\"\t\n.go"
         let prefix = ["package sample", "", "import ("] + (0..<8).map { "    \"package\($0)\"" }
@@ -139,6 +405,7 @@ final class GitRepositoryTests: XCTestCase {
         for snapshot in [added, worktree, committed, deleted] {
             let file = try XCTUnwrap(snapshot.files.first { $0.path == path })
             XCTAssertTrue(file.isGitlink)
+            XCTAssertTrue(file.unchangedSections.isEmpty)
             XCTAssertFalse(DiffPresentation.supportsImportFolding(file))
             let sources = try repo.contents(snapshot: snapshot,
                                            files: snapshot.files.filter(DiffPresentation.supportsImportFolding))

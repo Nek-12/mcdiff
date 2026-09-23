@@ -90,6 +90,79 @@ public struct GitRepository: Sendable {
         return try workingContent(path: relative, root: root)
     }
 
+    /// Resolves one omitted section only on request. Sources are temporary; the
+    /// returned context does not alter the patch or its review fingerprint.
+    public func unchangedLines(snapshot: ReviewSnapshot, file: FileDiff, section: UnchangedSection) throws -> [DiffPair] {
+        let sections = file.unchangedSections
+        guard snapshot.files.contains(where: { $0.path == file.path && $0.fingerprint == file.fingerprint }),
+              sections.contains(section) else {
+            throw GitError("This unchanged section is not part of the loaded review. Refresh the comparison.")
+        }
+        let oldSource = try content(snapshot: snapshot, file: file, side: .old)
+        guard !oldSource.utf8.prefix(8000).contains(0) else {
+            throw GitError("This file contains binary data and has no unchanged text to display.")
+        }
+        var old = oldSource.components(separatedBy: "\n")
+        if old.last == "" { old.removeLast() }
+        let oldHasFinalNewline = oldSource.utf8.last == 10
+        let stale = GitError("The file changed since this review was loaded. Refresh the comparison before showing unchanged lines.")
+        // Reconstruct the canonical new side from the immutable base and patch.
+        // Git verifies the complete live content below, including omitted areas,
+        // using its own clean filters rather than approximating normalization.
+        var expected = "", oldEnd = 0
+        func appendOld(_ range: Range<Int>) {
+            for index in range {
+                expected += old[index]
+                if index + 1 < old.count || oldHasFinalNewline { expected += "\n" }
+            }
+        }
+        for hunk in file.hunks {
+            guard let oldRange = hunk.oldRange, let newRange = hunk.newRange,
+                  oldRange.lowerBound >= oldEnd, oldRange.upperBound <= old.count else { throw stale }
+            appendOld(oldEnd..<oldRange.lowerBound)
+            for line in hunk.lines {
+                if let number = line.oldNumber {
+                    guard number > 0, number <= old.count, old[number - 1].utf8.elementsEqual(line.text.utf8) else { throw stale }
+                    if number == old.count {
+                        guard oldHasFinalNewline != hunk.noFinalNewlineSides.contains(.old) else { throw stale }
+                    }
+                }
+                if let number = line.newNumber {
+                    expected += line.text
+                    if number != newRange.upperBound || !hunk.noFinalNewlineSides.contains(.new) { expected += "\n" }
+                }
+            }
+            oldEnd = oldRange.upperBound
+        }
+        appendOld(oldEnd..<old.count)
+        if snapshot.targetRevision == nil {
+            let root = String(try git(["rev-parse", "--show-toplevel"]).text.dropLast())
+            let repository = GitRepository(path: root)
+            let relative = try contentPath(file: file, side: .new)
+            let entry = try workingEntry(path: relative, root: root)
+            let actualHash: String
+            if entry.type == .typeSymbolicLink {
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: entry.url.path)
+                actualHash = try repository.git(["hash-object", "--no-filters", "--stdin"], input: Data(target.utf8)).text
+            } else {
+                actualHash = try repository.git(["hash-object", "--", relative]).text
+            }
+            // Without -w, hash-object neither writes an object nor touches the index.
+            let expectedHash = try repository.git(["hash-object", "--no-filters", "--stdin"], input: Data(expected.utf8)).text
+            guard actualHash == expectedHash else { throw stale }
+        } else {
+            let actual = try content(snapshot: snapshot, file: file, side: .new)
+            guard actual.utf8.elementsEqual(expected.utf8) else { throw stale }
+        }
+        let count = section.count ?? (old.count - section.oldStart)
+        return (0..<count).map { offset in
+            let line = DiffLine(kind: .context, text: old[section.oldStart + offset],
+                                oldNumber: section.oldStart + offset + 1,
+                                newNumber: section.newStart + offset + 1)
+            return DiffPair(old: line, new: line)
+        }
+    }
+
     /// Reads comparison sides in batches without retaining another source cache.
     public func contents(snapshot: ReviewSnapshot, files: [FileDiff]) throws -> [String: (old: String, new: String)] {
         guard !files.isEmpty else { return [:] }
@@ -119,7 +192,7 @@ public struct GitRepository: Sendable {
         return relative
     }
 
-    private func workingContent(path relative: String, root: String) throws -> String {
+    private func workingEntry(path relative: String, root: String) throws -> (url: URL, type: FileAttributeType) {
         let rootURL = URL(fileURLWithPath: root).resolvingSymlinksInPath()
         let url = rootURL.appendingPathComponent(relative)
         let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().path
@@ -127,13 +200,18 @@ public struct GitRepository: Sendable {
             throw GitError("The file's parent directory points outside the repository.")
         }
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
-            return try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
-        }
-        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+        guard let type = attributes[.type] as? FileAttributeType, type == .typeRegular || type == .typeSymbolicLink else {
             throw GitError("This entry is not a regular file. Its changes are shown in the diff.")
         }
-        return String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        return (url, type)
+    }
+
+    private func workingContent(path relative: String, root: String) throws -> String {
+        let entry = try workingEntry(path: relative, root: root)
+        if entry.type == .typeSymbolicLink {
+            return try FileManager.default.destinationOfSymbolicLink(atPath: entry.url.path)
+        }
+        return String(decoding: try Data(contentsOf: entry.url), as: UTF8.self)
     }
 
     private func untrackedFile(_ relative: String) throws -> FileDiff {

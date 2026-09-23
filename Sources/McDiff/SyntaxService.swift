@@ -27,7 +27,7 @@ actor SyntaxService {
             "vue": "xml", "svelte": "xml", "proto": "protobuf"
         ][ext] ?? ((path as NSString).lastPathComponent.lowercased() == "dockerfile" ? "dockerfile" : nil)
     }
-    func highlight(file: FileDiff, dark: Bool, page: Int = 0) throws -> HighlightedFile {
+    func highlight(file: FileDiff, dark: Bool, page: Int = 0, context: [DiffLine] = []) throws -> HighlightedFile {
         guard let language = Self.language(for: file.path) else { return HighlightedFile(old: [:], new: [:]) }
         guard let highlighter else { throw SyntaxError.unavailable }
         highlighter.setTheme(to: dark ? "atom-one-dark" : "atom-one-light")
@@ -35,10 +35,10 @@ actor SyntaxService {
         var old = [Int: NSAttributedString](), new = [Int: NSAttributedString]()
         let firstLine = page * Self.pageSize + 1
         let lastLine = firstLine + Self.pageSize - 1
-        for hunk in file.hunks {
+        for source in file.hunks.map(\.lines) + [context] {
             try Task.checkCancellation()
             for side in [DiffSide.old, .new] {
-                let lines = hunk.lines.filter {
+                let lines = source.filter {
                     guard let number = side == .old ? $0.oldNumber : $0.newNumber else { return false }
                     return (firstLine...lastLine).contains(number)
                 }

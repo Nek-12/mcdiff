@@ -478,6 +478,10 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 self.diff.markdownContent = result.3
                 self.searchMatchingFiles = nil
                 self.diff.setComments(self.progress.comments)
+                let contextSource = ContextSource(snapshot: result.0)
+                self.diff.contexts.load = { file, section in
+                    try await contextSource.lines(file: file, section: section)
+                }
                 self.diff.setFiles(self.files, presentations: self.presentations)
                 self.rebuildSidebar()
                 self.updateComparisonPresentation()

@@ -19,7 +19,7 @@ public enum DiffPresentation {
 
     public static func supportsImportFolding(_ file: FileDiff) -> Bool {
         !file.isBinary && !file.isGitlink && !file.hunks.isEmpty &&
-            importExtensions.contains((file.path as NSString).pathExtension.lowercased())
+            [file.oldPath, file.path].contains { importExtensions.contains(($0 as NSString).pathExtension.lowercased()) }
     }
 
     /// Keeps the paired counterpart for word emphasis while ordering each
@@ -47,16 +47,17 @@ public enum DiffPresentation {
 
     public static func rows(for file: FileDiff, oldSource: String? = nil, newSource: String? = nil) -> [PresentedRow] {
         var result: [PresentedRow] = []
-        let ext = (file.path as NSString).pathExtension.lowercased()
-        let oldContext = oldSource.map { sourceImportNumbers($0, file: file, ext: ext, side: .old) }
-        let newContext = newSource.map { sourceImportNumbers($0, file: file, ext: ext, side: .new) }
+        let oldExtension = (file.oldPath as NSString).pathExtension.lowercased()
+        let newExtension = (file.path as NSString).pathExtension.lowercased()
+        let oldContext = oldSource.map { sourceImportNumbers($0, file: file, ext: oldExtension, side: .old) }
+        let newContext = newSource.map { sourceImportNumbers($0, file: file, ext: newExtension, side: .new) }
         for hunk in file.hunks {
             result.append(.hunk(hunk.header))
             let oldLines = hunk.lines.filter { $0.kind != .addition }
             let newLines = hunk.lines.filter { $0.kind != .deletion }
-            let oldImports = includingWhitespace(oldContext ?? importLineNumbers(oldLines, ext: ext, side: .old),
+            let oldImports = includingWhitespace(oldContext ?? importLineNumbers(oldLines, ext: oldExtension, side: .old),
                                                  lines: oldLines, side: .old)
-            let newImports = includingWhitespace(newContext ?? importLineNumbers(newLines, ext: ext, side: .new),
+            let newImports = includingWhitespace(newContext ?? importLineNumbers(newLines, ext: newExtension, side: .new),
                                                  lines: newLines, side: .new)
             var pairs: [DiffPair] = [], i = 0
             while i < hunk.lines.count {

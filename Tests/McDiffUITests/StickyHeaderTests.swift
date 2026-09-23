@@ -32,7 +32,7 @@ final class StickyHeaderTests: XCTestCase {
             view.diffLayout = layout
             view.navigate(to: 0)
             try await ready(view)
-            XCTAssertNil(view.scroll.topFade, "At the file start, its first source line must remain fully visible")
+            XCTAssertEqual(view.scroll.topFadeHeight, 0, "Source must not fade beneath the header")
             let next = try XCTUnwrap(view.headerRows[1])
             let nextY = view.table.rect(ofRow: next).minY
             for (origin, expected) in [(CGFloat(200), CGFloat(0)), (nextY - 19, CGFloat(-19))] {
@@ -44,11 +44,7 @@ final class StickyHeaderTests: XCTestCase {
                 XCTAssertEqual(cell.rowIndex, 0)
                 XCTAssertEqual(rect.minY - view.scroll.documentVisibleRect.minY, expected, accuracy: 1)
                 XCTAssertEqual(rect.height, 38, accuracy: 1)
-                if expected == 0 {
-                    XCTAssertEqual(view.scroll.topFade, 38..<54)
-                } else {
-                    XCTAssertNil(view.scroll.topFade, "Push-off must not fade the incoming file header")
-                }
+                XCTAssertEqual(view.scroll.topFadeHeight, 0, "The gradient belongs to the header, not the scrolling code")
             }
             view.scroll.contentView.scroll(to: NSPoint(x: 0, y: nextY - 10))
             view.scroll.reflectScrolledClipView(view.scroll.contentView)
@@ -129,10 +125,10 @@ final class StickyHeaderTests: XCTestCase {
     }
 
     @MainActor
-    func testFadeStartsBelowHeaderAndKeepsBottomFade() throws {
+    func testHeaderFadesAtBottomWhileSourceKeepsOnlyBottomFade() throws {
         _ = NSApplication.shared
         let scroll = FadingScrollView(frame: NSRect(x: 0, y: 0, width: 100, height: 200))
-        scroll.topFade = 38..<54
+        scroll.topFadeHeight = 0
         scroll.layoutSubtreeIfNeeded()
         let mask = try XCTUnwrap(scroll.layer?.mask)
         let image = NSImage(size: scroll.bounds.size, flipped: scroll.isFlipped) { _ in
@@ -146,8 +142,21 @@ final class StickyHeaderTests: XCTestCase {
         }
         XCTAssertGreaterThan(try alpha(8), 0.99)
         XCTAssertGreaterThan(try alpha(36), 0.99)
-        XCTAssertLessThan(try alpha(39), 0.15)
+        XCTAssertGreaterThan(try alpha(39), 0.99)
         XCTAssertGreaterThan(try alpha(60), 0.99)
         XCTAssertLessThan(try alpha(199), 0.15)
+
+        let header = PinnedFileHeader(frame: NSRect(x: 0, y: 0, width: 100, height: 38))
+        header.setHeaderFrame(header.bounds)
+        let material = try XCTUnwrap(header.subviews.compactMap { $0 as? NSVisualEffectView }.first)
+        let headerMask = try XCTUnwrap(material.layer?.mask)
+        let headerImage = NSImage(size: material.bounds.size, flipped: material.isFlipped) { _ in
+            headerMask.render(in: NSGraphicsContext.current!.cgContext)
+            return true
+        }
+        let headerBitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(headerImage.tiffRepresentation)))
+        let headerScale = CGFloat(headerBitmap.pixelsHigh) / 38
+        XCTAssertGreaterThan(try XCTUnwrap(headerBitmap.colorAt(x: 50, y: Int(25 * headerScale))).alphaComponent, 0.99)
+        XCTAssertLessThan(try XCTUnwrap(headerBitmap.colorAt(x: 50, y: Int(37 * headerScale))).alphaComponent, 0.25)
     }
 }

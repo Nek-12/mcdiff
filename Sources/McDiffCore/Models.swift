@@ -16,7 +16,25 @@ public struct DiffLine: Sendable, Equatable {
 public struct DiffHunk: Sendable, Equatable {
     public let header: String
     public let lines: [DiffLine]
-    public init(header: String, lines: [DiffLine]) { self.header = header; self.lines = lines }
+    /// Zero-based source ranges, including the insertion point for an empty side.
+    public let oldRange: Range<Int>?
+    public let newRange: Range<Int>?
+    public let noFinalNewlineSides: Set<DiffSide>
+    public init(header: String, lines: [DiffLine], oldRange: Range<Int>? = nil, newRange: Range<Int>? = nil,
+                noFinalNewlineSides: Set<DiffSide> = []) {
+        self.header = header; self.lines = lines
+        self.oldRange = oldRange; self.newRange = newRange
+        self.noFinalNewlineSides = noFinalNewlineSides
+    }
+}
+
+public struct UnchangedSection: Identifiable, Hashable, Sendable {
+    public var id: Int { beforeHunkIndex }
+    public let beforeHunkIndex: Int
+    public let oldStart: Int
+    public let newStart: Int
+    /// nil means the remainder of the file, whose length is resolved on demand.
+    public let count: Int?
 }
 
 public enum FileCategory: String, Codable, Sendable, CaseIterable {
@@ -39,6 +57,24 @@ public struct FileDiff: Identifiable, Sendable {
     public var additions: Int { hunks.reduce(0) { $0 + $1.lines.filter { $0.kind == .addition }.count } }
     public var deletions: Int { hunks.reduce(0) { $0 + $1.lines.filter { $0.kind == .deletion }.count } }
     public var isRemovalOnly: Bool { status == "D" || (additions == 0 && deletions > 0) }
+    public var unchangedSections: [UnchangedSection] {
+        guard status != "A", status != "D", !isBinary, !isGitlink,
+              !hunks.isEmpty || hasMetadataChanges else { return [] }
+        var result: [UnchangedSection] = []
+        var oldEnd = 0, newEnd = 0
+        for (index, hunk) in hunks.enumerated() {
+            guard let old = hunk.oldRange, let new = hunk.newRange,
+                  old.lowerBound >= oldEnd, new.lowerBound >= newEnd,
+                  old.lowerBound - oldEnd == new.lowerBound - newEnd else { return [] }
+            let count = old.lowerBound - oldEnd
+            if count > 0 {
+                result.append(UnchangedSection(beforeHunkIndex: index, oldStart: oldEnd, newStart: newEnd, count: count))
+            }
+            oldEnd = old.upperBound; newEnd = new.upperBound
+        }
+        result.append(UnchangedSection(beforeHunkIndex: hunks.count, oldStart: oldEnd, newStart: newEnd, count: nil))
+        return result
+    }
     public init(path: String, oldPath: String? = nil, status: String = "M", hunks: [DiffHunk],
                 isBinary: Bool = false, fingerprint: String, category: FileCategory = .production,
                 isFormattingOnly: Bool = false, hasMetadataChanges: Bool = false, isGitlink: Bool = false) {

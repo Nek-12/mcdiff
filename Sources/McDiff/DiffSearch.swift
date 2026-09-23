@@ -75,7 +75,8 @@ extension FileDiff {
 
 actor DiffSearchEngine {
     func search(query: String, files: [FileDiff], presentations: [String: [PresentedRow]],
-                markdown: [String: MarkdownFileContent], sourcePaths: Set<String>, layout: DiffLayout = .split) throws -> DiffSearchResults {
+                markdown: [String: MarkdownFileContent], sourcePaths: Set<String>, layout: DiffLayout = .split,
+                context: [String: [Int: [DiffPair]]] = [:]) throws -> DiffSearchResults {
         var groups: [DiffSearchResults.Group] = []
         var matchingFiles: [Int] = []
         var count = 0
@@ -128,10 +129,14 @@ actor DiffSearchEngine {
                 try appendPairs(code, importBlock: nil)
                 code.removeAll(keepingCapacity: true)
             }
+            var hunk = -1
             for (block, presentation) in (presentations[file.path] ?? []).enumerated() {
                 try Task.checkCancellation()
                 switch presentation {
-                case .hunk: try flush()
+                case .hunk:
+                    try flush()
+                    hunk += 1
+                    try appendPairs(context[file.path]?[hunk] ?? [], importBlock: nil)
                 case .code(let pair): code.append(pair)
                 case .imports(let pairs):
                     try flush()
@@ -139,6 +144,7 @@ actor DiffSearchEngine {
                 }
             }
             try flush()
+            try appendPairs(context[file.path]?[file.hunks.count] ?? [], importBlock: nil)
         }
         return DiffSearchResults(query: query, groups: groups, files: matchingFiles)
     }

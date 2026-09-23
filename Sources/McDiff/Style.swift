@@ -110,9 +110,8 @@ final class FlippedView: NSView {
 /// A layer mask softens the scroll boundary without placing a painted overlay on glass.
 final class FadingScrollView: NSScrollView {
     private let fade = CAGradientLayer()
-    /// Distances from the top edge; nil disables only the top fade.
-    var topFade: Range<CGFloat>? = 0..<16 {
-        didSet { if topFade != oldValue { updateFade() } }
+    var topFadeHeight: CGFloat = 16 {
+        didSet { if topFadeHeight != oldValue { updateFade() } }
     }
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -133,16 +132,10 @@ final class FadingScrollView: NSScrollView {
         fade.endPoint = CGPoint(x: 0.5, y: isFlipped ? 1 : 0)
         let height = max(1, bounds.height)
         let bottom = max(0.5, 1 - 16 / height)
-        if let topFade {
-            let start = min(bottom, max(0, topFade.lowerBound / height))
-            let end = min(bottom, max(start, topFade.upperBound / height))
-            fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor,
-                           NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
-            fade.locations = [0, start, start, end, bottom, 1].map { NSNumber(value: Double($0)) }
-        } else {
-            fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
-            fade.locations = [0, bottom, 1].map { NSNumber(value: Double($0)) }
-        }
+        let top = min(bottom, max(0, topFadeHeight / height))
+        fade.colors = [(top > 0 ? NSColor.clear : .black).cgColor,
+                       NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+        fade.locations = [0, top, bottom, 1].map { NSNumber(value: Double($0)) }
         CATransaction.commit()
     }
 }

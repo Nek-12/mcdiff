@@ -38,12 +38,22 @@ public enum DiffParser {
                     }
                     var old = try number(1), new = try number(3)
                     var oldRemaining = try number(2, default: 1), newRemaining = try number(4, default: 1)
+                    guard (oldRemaining == 0 || old > 0), (newRemaining == 0 || new > 0) else {
+                        throw fail("Nonempty hunk ranges must start at line one or later.")
+                    }
+                    let oldStart = oldRemaining == 0 ? old : old - 1
+                    let newStart = newRemaining == 0 ? new : new - 1
+                    let oldRange = oldStart..<(oldStart + oldRemaining)
+                    let newRange = newStart..<(newStart + newRemaining)
                     var content: [DiffLine] = []
+                    var noFinalNewlineSides: Set<DiffSide> = []
                     i += 1
                     while i < lines.count {
                         let body = lines[i]
                         if body == "\\ No newline at end of file" {
-                            guard !content.isEmpty else { throw fail("Newline marker without a preceding line.") }
+                            guard let preceding = content.last else { throw fail("Newline marker without a preceding line.") }
+                            if preceding.kind != .addition { noFinalNewlineSides.insert(.old) }
+                            if preceding.kind != .deletion { noFinalNewlineSides.insert(.new) }
                             metadataChanged = true
                             i += 1; continue
                         }
@@ -57,7 +67,8 @@ public enum DiffParser {
                         i += 1
                     }
                     guard oldRemaining == 0 && newRemaining == 0 else { throw fail("Truncated hunk.") }
-                    hunks.append(DiffHunk(header: line, lines: content))
+                    hunks.append(DiffHunk(header: line, lines: content, oldRange: oldRange, newRange: newRange,
+                                          noFinalNewlineSides: noFinalNewlineSides))
                     continue
                 } else if line.hasPrefix("--- ") {
                     let value = try markerPath(String(line.dropFirst(4)), line: i + 1)
