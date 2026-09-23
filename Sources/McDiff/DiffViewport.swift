@@ -23,6 +23,24 @@ struct CanvasRow {
         let line = side == .old ? pair.old : pair.new
         return sourceSide == nil || sourceSide == side || line?.kind == .context ? line : nil
     }
+    func sameLocation(as other: CanvasRow) -> Bool {
+        guard file == other.file else { return false }
+        switch (content, other.content) {
+        case (.code(let lhs), .code(let rhs)):
+            return sourceSide == other.sourceSide && lhs.old?.oldNumber == rhs.old?.oldNumber &&
+                lhs.new?.newNumber == rhs.new?.newNumber
+        case (.context(let lhs), .context(let rhs)): return lhs.id == rhs.id
+        case (.code(let pair), .context(let section)):
+            return pair.old?.oldNumber == section.oldStart + 1 && pair.new?.newNumber == section.newStart + 1
+        case (.imports(let pairs, _), .context(let section)):
+            return pairs.contains { $0.old?.oldNumber == section.oldStart + 1 && $0.new?.newNumber == section.newStart + 1 }
+        case (.imports(let lhs, _), .imports(let rhs, _)):
+            guard let first = rhs.first else { return false }
+            return lhs.contains { $0.old?.oldNumber == first.old?.oldNumber && $0.new?.newNumber == first.new?.newNumber }
+        case (.file, .file), (.markdown, .markdown), (.padding, .padding): return true
+        default: return false
+        }
+    }
     var height: CGFloat {
         switch content {
         case .file: return 38
@@ -82,10 +100,20 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         replaceFileRows(at: index)
         if !searchQuery.isEmpty { search(query: searchQuery) }
     }
-    private func replaceFileRows(at index: Int, preserving anchor: Int? = nil) {
+    private func replaceFileRows(at index: Int, preserving anchor: Int? = nil, visibleSource: Bool = false) {
         guard let header = headerRows[index] else { return }
         let end = headerRows[index + 1] ?? (rows.count - 1)
-        replaceRows(in: header..<end, with: fileRows(at: index), preserving: anchor ?? header)
+        let replacement = fileRows(at: index)
+        let visible = table.rows(in: scroll.documentVisibleRect).location
+        let anchor = visibleSource && rows.indices.contains(visible) ? visible : anchor ?? header
+        let newAnchor: Int
+        if anchor >= end { newAnchor = anchor + replacement.count - (end - header) }
+        else if anchor < header { newAnchor = anchor }
+        else if visibleSource {
+            newAnchor = header + (replacement.firstIndex { $0.sameLocation(as: rows[anchor]) } ?? 0)
+        } else { newAnchor = anchor }
+        replaceRows(in: header..<end, with: replacement, preserving: anchor, newAnchor: newAnchor,
+                    continueNavigation: visibleSource)
     }
     func setExpanded(_ value: Bool, file index: Int) {
         let path = files[index].path
@@ -93,19 +121,25 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         if value { expanded.insert(path) } else { expanded.remove(path) }
         replaceFileRows(at: index)
     }
-    private func replaceRows(in range: Range<Int>, with replacement: [CanvasRow], preserving anchor: Int) {
-        stopNavigation()
+    private func replaceRows(in range: Range<Int>, with replacement: [CanvasRow], preserving anchor: Int,
+                             newAnchor: Int? = nil, continueNavigation: Bool = false) {
+        if !continueNavigation { stopNavigation() }
         Style.animateStateChange(scroll.contentView)
-        preservingScrollAnchor(row: anchor) {
+        preservingScrollAnchor(row: anchor, newRow: newAnchor) {
             // Preserve measured geometry outside the changed section; it defines
             // the clicked header's position while replacement heights are prepared.
             if rowHeights.count == rows.count {
-                rowHeights.replaceSubrange(range, with: replacement.map(\.height))
+                var heights = replacement.map(\.height)
+                if let newAnchor, heights.indices.contains(newAnchor - range.lowerBound),
+                   replacement[newAnchor - range.lowerBound].sameLocation(as: rows[anchor]) {
+                    heights[newAnchor - range.lowerBound] = rowHeights[anchor]
+                }
+                rowHeights.replaceSubrange(range, with: heights)
             }
             rows.replaceSubrange(range, with: replacement)
             indexHeaders()
             table.reloadData()
-            prepareLayout(preserving: anchor)
+            prepareLayout(preserving: newAnchor ?? anchor)
         }
         visibleChanged()
     }
@@ -213,6 +247,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     override init(frame: NSRect) {
         super.init(frame: frame)
         contexts.onChange = { [weak self] path, section in self?.contextChanged(path: path, section: section) }
+        contexts.onResolved = { [weak self] path, rows in self?.contextResolved(path: path, rows: rows) }
         highlights.totalCostLimit = 48 * 1024 * 1024
         markdownLayouts.totalCostLimit = 32 * 1024 * 1024
         markdownLayouts.countLimit = 12
@@ -277,7 +312,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             redraw()
             pumpMarkdown()
         }
-        updatePinnedHeader()
+        visibleChanged()
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -486,26 +521,26 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             result.append(CanvasRow(file: index, content: .notice("Metadata-only change · \(file.status == "R" ? "renamed from " + file.oldPath : "file mode or identity changed")")))
         }
         var code: [DiffPair] = []
-        let sections = Dictionary(uniqueKeysWithValues: file.unchangedSections.map { ($0.id, $0) })
-        var hunk = -1
-        func appendContext(_ hunkIndex: Int) {
-            guard let section = sections[hunkIndex] else { return }
-            result.append(CanvasRow(file: index, content: .context(section)))
-            if case .expanded(let pairs) = contexts.state(path: file.path, section: section.id) {
-                result += sourceRows(pairs, file: index)
-            }
-        }
         func flush() {
             result += sourceRows(code, file: index)
             code.removeAll(keepingCapacity: true)
         }
-        for (block, presentation) in (presentations[file.path] ?? []).enumerated() {
+        let presented = presentations[file.path] ?? []
+        for (block, presentation) in presented.enumerated() {
             switch presentation {
             case .hunk(let text):
                 flush()
-                hunk += 1
-                appendContext(hunk)
-                if block > 0 && sections[hunk] == nil { result.append(CanvasRow(file: index, content: .hunk(text))) }
+                if block > 0 {
+                    if case .context = presented[block - 1] {} else {
+                        result.append(CanvasRow(file: index, content: .hunk(text)))
+                    }
+                }
+            case .context(let section):
+                flush()
+                result.append(CanvasRow(file: index, content: .context(section)))
+                if case .expanded(let pairs) = contexts.state(path: file.path, section: section.id) {
+                    result += sourceRows(pairs, file: index)
+                }
             case .code(let pair): code.append(pair)
             case .imports(let pairs):
                 flush()
@@ -516,8 +551,38 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             }
         }
         flush()
-        appendContext(file.hunks.count)
         return result
+    }
+    private func contextResolved(path: String, rows resolved: [PresentedRow]?) {
+        guard let file = files.firstIndex(where: { $0.path == path }) else { return }
+        guard let resolved else { redraw(); return }
+        let visible = table.rows(in: scroll.documentVisibleRect).location
+        let visibleRow = rows.indices.contains(visible) ? rows[visible] : nil
+        // An import fold may acquire omitted prefixes/suffixes or join another
+        // fold. Keep an already-expanded run open when its source overlaps.
+        var openedOld = Set<Int>(), openedNew = Set<Int>()
+        for (block, row) in (presentations[path] ?? []).enumerated() {
+            guard expandedImports.remove(importKey(path, block)) != nil, case .imports(let pairs) = row else { continue }
+            openedOld.formUnion(pairs.compactMap { $0.old?.oldNumber })
+            openedNew.formUnion(pairs.compactMap { $0.new?.newNumber })
+        }
+        for (block, row) in resolved.enumerated() {
+            guard case .imports(let pairs) = row else { continue }
+            var keepOpen = false
+            if let visibleRow, visibleRow.file == file, case .code(let current) = visibleRow.content {
+                keepOpen = pairs.contains {
+                    $0.old?.oldNumber == current.old?.oldNumber && $0.new?.newNumber == current.new?.newNumber
+                }
+            }
+            if !openedOld.isEmpty || !openedNew.isEmpty {
+                keepOpen = keepOpen || pairs.contains {
+                    $0.old?.oldNumber.map(openedOld.contains) == true || $0.new?.newNumber.map(openedNew.contains) == true
+                }
+            }
+            if keepOpen { expandedImports.insert(importKey(path, block)) }
+        }
+        presentations[path] = resolved
+        updateContextLayout(file: file, visibleSource: true)
     }
     private func contextChanged(path: String, section: Int) {
         guard let file = files.firstIndex(where: { $0.path == path }) else { return }
@@ -531,17 +596,33 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             guard $0.file == file, case .context(let value) = $0.content else { return false }
             return value.id == section
         }
+        updateContextLayout(file: file, anchor: anchor)
+    }
+    private func updateContextLayout(file: Int, anchor: Int? = nil, visibleSource: Bool = false) {
+        let path = files[file].path
         highlightTask?.cancel(); highlightTask = nil
         highlights.removeAllObjects(); failedHighlights.removeAll()
-        let originalMaximum = files[file].hunks.flatMap(\.lines).reduce(1) { max($0, $1.oldNumber ?? 0, $1.newNumber ?? 0) }
+        let originalMaximum = (presentations[path] ?? []).reduce(1) { maximum, row in
+            switch row {
+            case .code(let pair): return max(maximum, pair.old?.oldNumber ?? 0, pair.new?.newNumber ?? 0)
+            case .imports(let pairs):
+                return pairs.reduce(maximum) { max($0, $1.old?.oldNumber ?? 0, $1.new?.newNumber ?? 0) }
+            default: return maximum
+            }
+        }
         let maximum = (contexts.expandedPairs[path] ?? [:]).values.reduce(originalMaximum) {
             max($0, $1.last?.old?.oldNumber ?? 0, $1.last?.new?.newNumber ?? 0)
         }
         numberWidths[file] = SourceGutter.numberWidth(for: maximum)
-        if let anchor { replaceFileRows(at: file, preserving: anchor) }
+        replaceFileRows(at: file, preserving: anchor, visibleSource: visibleSource)
         if !searchQuery.isEmpty { search(query: searchQuery, preserving: currentSearchMatch) }
     }
     func contextTitle(file: Int, section: UnchangedSection) -> String {
+        switch contexts.preparation(path: files[file].path) {
+        case .loading: return "Loading unchanged lines…"
+        case .failed(let message): return "\(message.replacingOccurrences(of: "\n", with: " ")) — Retry"
+        default: break
+        }
         switch contexts.state(path: files[file].path, section: section.id) {
         case .loading: return "Loading unchanged lines…"
         case .expanded: return "Hide unchanged lines"
@@ -662,6 +743,10 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let start = min(range.location, rows.count - 1)
         let current = navigationAnimation?.file ?? rows[start].file
         if current != focusedFile { focusedFile = current; onFocus?(current) }
+        let visibleFiles = Set(rows[start..<min(rows.count, range.location + range.length)].map(\.file))
+        for index in visibleFiles.sorted() where expanded.contains(files[index].path) && !rendersMarkdown(files[index]) {
+            contexts.prepare(file: files[index])
+        }
         pumpHighlight()
         pumpMarkdown()
     }
@@ -727,7 +812,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             self.pumpMarkdown()
         }
     }
-    private func preservingScrollAnchor(row: Int? = nil, _ update: () -> Void) {
+    private func preservingScrollAnchor(row: Int? = nil, newRow: Int? = nil, _ update: () -> Void) {
         let visible = table.rows(in: scroll.documentVisibleRect)
         let anchor = row ?? (visible.location != NSNotFound && visible.location < rows.count ? visible.location : nil)
         let inset = anchor.map {
@@ -738,7 +823,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         } ?? 0
         update()
         table.layoutSubtreeIfNeeded()
-        if let anchor {
+        if let anchor = newRow ?? anchor {
             let rect = table.rect(ofRow: anchor)
             scroll.contentView.scroll(to: NSPoint(x: 0, y: rect.minY + min(inset, max(0, rect.height - 1))))
             scroll.reflectScrolledClipView(scroll.contentView)
@@ -758,7 +843,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             return highlights.object(forKey: key) == nil && !failedHighlights.contains(key as String)
         }) else { return }
         let file = files[index], key = highlightKey(file, page: page), dark = Style.dark
-        let context = contexts.pageLines(path: file.path, page: page)
+        let context = contextPageLines(file: index, page: page)
         highlightTask = Task { [weak self, syntax] in
             do {
                 let value = try await syntax.highlight(file: file, dark: dark, page: page, context: context)
@@ -831,6 +916,14 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             let replacement = [item] + (wasExpanded ? [] : code)
             replaceRows(in: row..<(row + 1 + (wasExpanded ? code.count : 0)), with: replacement, preserving: row)
         case .context(let section):
+            switch contexts.preparation(path: file.path) {
+            case .loading: return
+            case .failed:
+                contexts.prepare(file: file, retry: true)
+                redraw()
+                return
+            default: break
+            }
             contexts.toggle(file: file, section: section)
         case .code(let pair):
             let side = sourceSide(row: row, x: point.x)
@@ -963,6 +1056,10 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
     private func importKey(_ path: String, _ block: Int) -> String { "\(path):\(block)" }
     func importsExpanded(path: String, block: Int) -> Bool { expandedImports.contains(importKey(path, block)) }
+    func contextPageLines(file: Int, page: Int) -> [DiffLine] {
+        let path = files[file].path
+        return contexts.pageLines(path: path, page: page, presentation: presentations[path] ?? [])
+    }
     func copySelection() {
         guard let text = selectedSourceText() else { return }
         NSPasteboard.general.clearContents()
@@ -974,7 +1071,14 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let context = (contexts.expandedPairs[file.path] ?? [:]).values.flatMap { pairs in
             pairs.compactMap { selection.side == .old ? $0.old : $0.new }
         }
-        let lines = (file.hunks.flatMap(\.lines) + context).filter {
+        let presented = (presentations[file.path] ?? []).flatMap { row -> [DiffLine] in
+            switch row {
+            case .code(let pair): return (selection.side == .old ? pair.old : pair.new).map { [$0] } ?? []
+            case .imports(let pairs): return pairs.compactMap { selection.side == .old ? $0.old : $0.new }
+            default: return []
+            }
+        }
+        let lines = (presented + context).filter {
             let n = selection.side == .old ? $0.oldNumber : $0.newNumber
             return n.map { $0 >= selection.start && $0 <= selection.end } ?? false
         }.sorted {
@@ -1120,7 +1224,7 @@ final class PinnedFileHeader: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = true
-        material.material = .headerView
+        material.material = .windowBackground
         material.blendingMode = .withinWindow
         material.state = .followsWindowActiveState
         material.wantsLayer = true
@@ -1180,7 +1284,10 @@ final class DiffCell: NSView {
             case .imports(_, let block):
                 disclosureTip = owner.importsExpanded(path: owner.files[row.file].path, block: block) ? "Collapse imports" : "Expand imports"
             case .context(let section):
-                if case .failed(let message) = owner.contexts.state(path: owner.files[row.file].path, section: section.id) {
+                let path = owner.files[row.file].path
+                if case .failed(let message) = owner.contexts.preparation(path: path) {
+                    disclosureTip = message
+                } else if case .failed(let message) = owner.contexts.state(path: path, section: section.id) {
                     disclosureTip = message
                 } else { disclosureTip = owner.contextTitle(file: row.file, section: section) }
             default: break
@@ -1291,10 +1398,13 @@ final class DiffCell: NSView {
         case .context(let section):
             let state = owner.contexts.state(path: file.path, section: section.id)
             let icon: String
-            switch state {
-            case .expanded: icon = "chevron-down"
-            case .failed: icon = "rotate-cw"
-            default: icon = "chevron-right"
+            if case .failed = owner.contexts.preparation(path: file.path) { icon = "rotate-cw" }
+            else {
+                switch state {
+                case .expanded: icon = "chevron-down"
+                case .failed: icon = "rotate-cw"
+                default: icon = "chevron-right"
+                }
             }
             if case .empty = state {} else {
                 Icons.draw(icon, in: NSRect(x: 7, y: 8, width: 12, height: 12))

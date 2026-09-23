@@ -29,12 +29,19 @@ public struct DiffHunk: Sendable, Equatable {
 }
 
 public struct UnchangedSection: Identifiable, Hashable, Sendable {
-    public var id: Int { beforeHunkIndex }
+    /// Import runs can split one hunk gap into several independently controlled sections.
+    public var id: Int { oldStart }
     public let beforeHunkIndex: Int
     public let oldStart: Int
     public let newStart: Int
     /// nil means the remainder of the file, whose length is resolved on demand.
     public let count: Int?
+    public init(beforeHunkIndex: Int, oldStart: Int, newStart: Int, count: Int?) {
+        self.beforeHunkIndex = beforeHunkIndex
+        self.oldStart = oldStart
+        self.newStart = newStart
+        self.count = count
+    }
 }
 
 public enum FileCategory: String, Codable, Sendable, CaseIterable {

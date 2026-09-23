@@ -113,13 +113,55 @@ final class GitRepositoryTests: XCTestCase {
             stale[index] = "edited after loading"
             try write("tracked.swift", stale.joined(separator: "\n") + "\n")
             XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: first))
+            XCTAssertThrowsError(try repo.contextPresentation(snapshot: snapshot, file: file))
         }
         for stale in [source + "new trailing line\n", String(source.dropLast()), changed.dropLast().joined(separator: "\n")] {
             try write("tracked.swift", stale)
             XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: first))
+            XCTAssertThrowsError(try repo.contextPresentation(snapshot: snapshot, file: file))
         }
         try write("tracked.swift", source)
         XCTAssertFalse(try repo.unchangedLines(snapshot: snapshot, file: file, section: first).isEmpty)
+        XCTAssertFalse(try repo.contextPresentation(snapshot: snapshot, file: file).isEmpty)
+    }
+
+    func testResolvedImportsLeaveOnlyOrdinaryContextDisclosuresAndValidateTheirSubranges() throws {
+        let old = ["package sample", "", "import ("] + (1...40).map { "\t\"module\($0)\"" } +
+            [")", "", "func main() {}"] + (1...10).map { "// remaining \($0)" }
+        try write("source.go", old.joined(separator: "\n") + "\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "imports"])
+        var new = old
+        new[12] = "\t\"replacement10\""
+        new[30] = "\t\"replacement28\""
+        try write("source.go", new.joined(separator: "\n") + "\n")
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first)
+        let rows = try repo.contextPresentation(snapshot: snapshot, file: file)
+        let imports = rows.compactMap { row -> [DiffPair]? in
+            if case .imports(let pairs) = row { return pairs }; return nil
+        }
+        XCTAssertEqual(imports.count, 1)
+        XCTAssertEqual(imports.first?.compactMap { $0.new?.newNumber }, Array(3...44))
+        let sections = rows.compactMap { row -> UnchangedSection? in
+            if case .context(let section) = row { return section }; return nil
+        }
+        let tail = try XCTUnwrap(sections.last)
+        XCTAssertEqual(sections.count, 1)
+        XCTAssertEqual(tail.oldStart, 44)
+        let remainder = try repo.unchangedLines(snapshot: snapshot, file: file, section: tail)
+        XCTAssertEqual(remainder.compactMap { $0.new?.text }, Array(new.dropFirst(44)))
+        let invalid = UnchangedSection(beforeHunkIndex: tail.beforeHunkIndex,
+                                       oldStart: tail.oldStart, newStart: tail.newStart + 1, count: 2)
+        XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: invalid))
+        let oversized = UnchangedSection(beforeHunkIndex: tail.beforeHunkIndex,
+                                         oldStart: tail.oldStart, newStart: tail.newStart, count: Int.max)
+        XCTAssertThrowsError(try repo.unchangedLines(snapshot: snapshot, file: file, section: oversized))
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "changed imports"])
+        let committed = try load(base: "HEAD~1", target: "HEAD", mergeBase: false)
+        try write("source.go", "changed worktree")
+        XCTAssertFalse(try repo.contextPresentation(snapshot: committed, file: committed.files[0]).isEmpty)
     }
 
     func testMetadataOnlyRenameExposesWholeFileButAddedDeletedBinaryDoNot() throws {
@@ -210,9 +252,7 @@ final class GitRepositoryTests: XCTestCase {
         let snapshot = try load()
         let file = try XCTUnwrap(snapshot.files.first { $0.path == "renamed.txt" })
         XCTAssertEqual(file.oldPath, "original.go")
-        XCTAssertTrue(DiffPresentation.supportsImportFolding(file))
-        let sources = try XCTUnwrap(repo.contents(snapshot: snapshot, files: [file])[file.path])
-        let folded = DiffPresentation.rows(for: file, oldSource: sources.old, newSource: sources.new).flatMap { row -> [DiffPair] in
+        let folded = try repo.contextPresentation(snapshot: snapshot, file: file).flatMap { row -> [DiffPair] in
             if case .imports(let pairs) = row { return pairs }; return []
         }
         XCTAssertEqual(folded.compactMap { $0.old?.text }, ["import \"old\""])
@@ -317,7 +357,7 @@ final class GitRepositoryTests: XCTestCase {
         }
     }
 
-    func testBatchSourceContextFoldsPartialGoImportsInWorktreeAndRevisions() throws {
+    func testSourceContextFoldsCompleteGoImportsInWorktreeAndRevisions() throws {
         let path = "imports \"odd\"\t\n.go"
         let prefix = ["package sample", "", "import ("] + (0..<8).map { "    \"package\($0)\"" }
         let oldLines = prefix + ["", "    alias \"old\"", ")", "", "func work() {}"]
@@ -333,10 +373,7 @@ final class GitRepositoryTests: XCTestCase {
         for snapshot in [worktree, committed] {
             let file = try XCTUnwrap(snapshot.files.first { $0.path == path })
             XCTAssertFalse(file.hunks.flatMap(\.lines).contains { $0.text == "import (" })
-            let content = try XCTUnwrap(repo.contents(snapshot: snapshot, files: [file])[path])
-            XCTAssertEqual(content.old, oldLines.joined(separator: "\n") + "\n")
-            XCTAssertEqual(content.new, newLines.joined(separator: "\n") + "\n")
-            let rows = DiffPresentation.rows(for: file, oldSource: content.old, newSource: content.new)
+            let rows = try repo.contextPresentation(snapshot: snapshot, file: file)
             let folded = rows.flatMap { row -> [DiffPair] in
                 if case .imports(let pairs) = row { return pairs }; return []
             }
@@ -344,16 +381,15 @@ final class GitRepositoryTests: XCTestCase {
             XCTAssertTrue(folded.contains { $0.old?.text == "    alias \"old\"" })
             XCTAssertTrue(folded.contains { $0.new?.text == ")" })
             XCTAssertFalse(folded.contains { $0.new?.text == "func work() {}" })
-            XCTAssertEqual(DiffPresentation.sourceRows(folded, layout: .unified).compactMap {
-                $0.side == .old ? $0.pair.old : $0.pair.new
-            }, file.hunks.flatMap(\.lines).filter {
-                ($0.oldNumber.map { $0 <= oldLines.count - 2 } ?? true) &&
-                ($0.newNumber.map { $0 <= newLines.count - 2 } ?? true)
-            })
+            XCTAssertEqual(folded.compactMap { $0.old?.text }, Array(oldLines.dropFirst(2).dropLast(2)))
+            XCTAssertEqual(folded.compactMap { $0.new?.text }, Array(newLines.dropFirst(2).dropLast(2)))
+            XCTAssertEqual(DiffPresentation.sourceRows(folded, layout: .unified).filter {
+                $0.pair.old?.kind == .context
+            }.count, folded.filter { $0.old?.kind == .context }.count)
         }
     }
 
-    func testBatchContentsPreserveAddedDeletedAndRenamedSidesAndSurfaceFailures() throws {
+    func testContentsPreserveAddedDeletedAndRenamedSidesAndSurfaceFailures() throws {
         try write("removed.go", "import \"removed\"\n")
         try write("original.go", "import \"original\"\n")
         _ = try repo.git(["add", "."])
@@ -363,7 +399,10 @@ final class GitRepositoryTests: XCTestCase {
         try write("added.go", "import \"added\"\n")
         let snapshot = try load()
         let files = snapshot.files.filter { $0.path.hasSuffix(".go") }
-        let contents = try repo.contents(snapshot: snapshot, files: files)
+        let contents = try Dictionary(uniqueKeysWithValues: files.map {
+            ($0.path, (old: try repo.content(snapshot: snapshot, file: $0, side: .old),
+                       new: try repo.content(snapshot: snapshot, file: $0, side: .new)))
+        })
         XCTAssertEqual(contents["removed.go"]?.new, "")
         XCTAssertEqual(contents["removed.go"]?.old, "import \"removed\"\n")
         XCTAssertEqual(contents["added.go"]?.old, "")
@@ -371,7 +410,8 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertEqual(contents["renamed.go"]?.old, "import \"original\"\n")
         XCTAssertEqual(contents["renamed.go"]?.new, "import \"original\"\n")
         try FileManager.default.removeItem(at: root.appendingPathComponent("added.go"))
-        XCTAssertThrowsError(try repo.contents(snapshot: snapshot, files: files))
+        let added = try XCTUnwrap(files.first { $0.path == "added.go" })
+        XCTAssertThrowsError(try repo.content(snapshot: snapshot, file: added, side: .new))
     }
 
     func testGoNamedGitlinkRemainsVisibleWithoutReadingItAsSource() throws {
@@ -397,7 +437,6 @@ final class GitRepositoryTests: XCTestCase {
         try write("ordinary.go", "Subproject commit \(second)\n")
         let ordinary = try XCTUnwrap(load().files.first { $0.path == "ordinary.go" })
         XCTAssertFalse(ordinary.isGitlink)
-        XCTAssertTrue(DiffPresentation.supportsImportFolding(ordinary))
         _ = try repo.git(["update-index", "--force-remove", path])
         _ = try repo.git(["commit", "-m", "remove gitlink"])
         let deleted = try load(base: "HEAD~1", target: "HEAD", mergeBase: false)
@@ -406,10 +445,9 @@ final class GitRepositoryTests: XCTestCase {
             let file = try XCTUnwrap(snapshot.files.first { $0.path == path })
             XCTAssertTrue(file.isGitlink)
             XCTAssertTrue(file.unchangedSections.isEmpty)
-            XCTAssertFalse(DiffPresentation.supportsImportFolding(file))
-            let sources = try repo.contents(snapshot: snapshot,
-                                           files: snapshot.files.filter(DiffPresentation.supportsImportFolding))
-            XCTAssertTrue(sources.isEmpty)
+            XCTAssertThrowsError(try repo.contextPresentation(snapshot: snapshot, file: file)) {
+                XCTAssertTrue($0.localizedDescription.contains("no unchanged sections"))
+            }
             let rows = DiffPresentation.rows(for: file)
             let pairs = rows.compactMap { row -> DiffPair? in
                 if case .code(let pair) = row { return pair }; return nil
@@ -619,10 +657,7 @@ final class GitRepositoryTests: XCTestCase {
         for index in 0..<400 { try write("Source\(index).kt", new) }
         let start = ProcessInfo.processInfo.systemUptime
         let snapshot = try load()
-        let sources = try repo.contents(snapshot: snapshot, files: snapshot.files.filter(DiffPresentation.supportsImportFolding))
-        let rows = snapshot.files.map {
-            DiffPresentation.rows(for: $0, oldSource: sources[$0.path]?.old, newSource: sources[$0.path]?.new)
-        }
+        let rows = snapshot.files.map { DiffPresentation.rows(for: $0) }
         let elapsed = ProcessInfo.processInfo.systemUptime - start
         XCTAssertEqual(rows.reduce(0) { count, rows in
             count + rows.filter { if case .code = $0 { return true }; return false }.count
@@ -630,7 +665,8 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertEqual(snapshot.files.count, 400)
         XCTAssertEqual(snapshot.files.reduce(0) { $0 + $1.additions }, 30_000)
         XCTAssertEqual(snapshot.files.reduce(0) { $0 + $1.deletions }, 30_000)
-        print("Backend stress: 400 files / 30,000 source lines / 60,000 changed diff lines loaded with source presentation in \(elapsed) seconds")
+        print("Backend stress: 400 files / 30,000 source lines / 60,000 changed diff lines loaded with initial presentation in \(elapsed) seconds")
+        XCTAssertEqual(try repo.contextPresentation(snapshot: snapshot, file: snapshot.files[0]).count, 75)
     }
 
     func testLargeUntrackedReview() throws {
@@ -638,10 +674,7 @@ final class GitRepositoryTests: XCTestCase {
         for index in 0..<400 { try write("Source\(index).kt", contents) }
         let start = ProcessInfo.processInfo.systemUptime
         let snapshot = try load()
-        let sources = try repo.contents(snapshot: snapshot, files: snapshot.files.filter(DiffPresentation.supportsImportFolding))
-        let rows = snapshot.files.map {
-            DiffPresentation.rows(for: $0, oldSource: sources[$0.path]?.old, newSource: sources[$0.path]?.new)
-        }
+        let rows = snapshot.files.map { DiffPresentation.rows(for: $0) }
         let elapsed = ProcessInfo.processInfo.systemUptime - start
         XCTAssertEqual(rows.reduce(0) { count, rows in
             count + rows.filter { if case .code = $0 { return true }; return false }.count

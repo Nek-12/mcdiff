@@ -90,13 +90,41 @@ public struct GitRepository: Sendable {
         return try workingContent(path: relative, root: root)
     }
 
-    /// Resolves one omitted section only on request. Sources are temporary; the
-    /// returned context does not alter the patch or its review fingerprint.
+    /// Sources are temporary; resolved context never changes the review identity.
+    public func contextPresentation(snapshot: ReviewSnapshot, file: FileDiff) throws -> [PresentedRow] {
+        let sources = try validatedContextSources(snapshot: snapshot, file: file)
+        return DiffPresentation.rows(for: file, oldSource: sources.oldSource,
+                                     newSource: sources.newSource, resolveContext: true)
+    }
+
     public func unchangedLines(snapshot: ReviewSnapshot, file: FileDiff, section: UnchangedSection) throws -> [DiffPair] {
-        let sections = file.unchangedSections
-        guard snapshot.files.contains(where: { $0.path == file.path && $0.fingerprint == file.fingerprint }),
-              sections.contains(section) else {
+        // Presentation may split an omitted section around imports. Only allow
+        // subranges of a genuine omission, with the original old/new offset.
+        guard let parent = file.unchangedSections.first(where: { $0.beforeHunkIndex == section.beforeHunkIndex }),
+              section.oldStart >= parent.oldStart,
+              section.newStart >= parent.newStart,
+              section.oldStart - parent.oldStart == section.newStart - parent.newStart,
+              section.count.map({ $0 >= 0 }) ?? true else {
             throw GitError("This unchanged section is not part of the loaded review. Refresh the comparison.")
+        }
+        let sources = try validatedContextSources(snapshot: snapshot, file: file)
+        let end = parent.count.map { parent.oldStart + $0 } ?? sources.old.count
+        guard section.oldStart <= end else { throw GitError("Invalid unchanged section range. Refresh the comparison.") }
+        let count = section.count ?? (end - section.oldStart)
+        guard count <= end - section.oldStart else { throw GitError("Invalid unchanged section range. Refresh the comparison.") }
+        return (0..<count).map { offset in
+            let line = DiffLine(kind: .context, text: sources.old[section.oldStart + offset],
+                                oldNumber: section.oldStart + offset + 1,
+                                newNumber: section.newStart + offset + 1)
+            return DiffPair(old: line, new: line)
+        }
+    }
+
+    private func validatedContextSources(snapshot: ReviewSnapshot, file: FileDiff) throws
+        -> (old: [String], oldSource: String, newSource: String) {
+        guard snapshot.files.contains(where: { $0.path == file.path && $0.fingerprint == file.fingerprint }),
+              !file.unchangedSections.isEmpty else {
+            throw GitError("This file has no unchanged sections in the loaded review. Refresh the comparison.")
         }
         let oldSource = try content(snapshot: snapshot, file: file, side: .old)
         guard !oldSource.utf8.prefix(8000).contains(0) else {
@@ -154,34 +182,7 @@ public struct GitRepository: Sendable {
             let actual = try content(snapshot: snapshot, file: file, side: .new)
             guard actual.utf8.elementsEqual(expected.utf8) else { throw stale }
         }
-        let count = section.count ?? (old.count - section.oldStart)
-        return (0..<count).map { offset in
-            let line = DiffLine(kind: .context, text: old[section.oldStart + offset],
-                                oldNumber: section.oldStart + offset + 1,
-                                newNumber: section.newStart + offset + 1)
-            return DiffPair(old: line, new: line)
-        }
-    }
-
-    /// Reads comparison sides in batches without retaining another source cache.
-    public func contents(snapshot: ReviewSnapshot, files: [FileDiff]) throws -> [String: (old: String, new: String)] {
-        guard !files.isEmpty else { return [:] }
-        let oldFiles = files.filter { $0.status != "A" }
-        let newFiles = files.filter { $0.status != "D" }
-        let old = try blobContents(oldFiles.map { "\(snapshot.baseRevision):\(try contentPath(file: $0, side: .old))" })
-        let newPaths = try newFiles.map { try contentPath(file: $0, side: .new) }
-        let new: [String]
-        if let revision = snapshot.targetRevision {
-            new = try blobContents(newPaths.map { "\(revision):\($0)" })
-        } else {
-            let root = String(try git(["rev-parse", "--show-toplevel"]).text.dropLast())
-            new = try newPaths.map { try workingContent(path: $0, root: root) }
-        }
-        let oldByPath = Dictionary(uniqueKeysWithValues: zip(oldFiles.map(\.path), old))
-        let newByPath = Dictionary(uniqueKeysWithValues: zip(newFiles.map(\.path), new))
-        return Dictionary(uniqueKeysWithValues: files.map {
-            ($0.path, (old: oldByPath[$0.path] ?? "", new: newByPath[$0.path] ?? ""))
-        })
+        return (old, oldSource, expected)
     }
 
     private func contentPath(file: FileDiff, side: DiffSide) throws -> String {

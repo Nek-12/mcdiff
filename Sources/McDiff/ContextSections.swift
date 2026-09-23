@@ -5,6 +5,12 @@ import McDiffCore
 actor ContextSource {
     private let snapshot: ReviewSnapshot
     init(snapshot: ReviewSnapshot) { self.snapshot = snapshot }
+    func presentation(file: FileDiff) throws -> [PresentedRow] {
+        try Task.checkCancellation()
+        let rows = try GitRepository(path: snapshot.request.repository).contextPresentation(snapshot: snapshot, file: file)
+        try Task.checkCancellation()
+        return rows
+    }
     func lines(file: FileDiff, section: UnchangedSection) throws -> [DiffPair] {
         try Task.checkCancellation()
         let lines = try GitRepository(path: snapshot.request.repository)
@@ -16,6 +22,49 @@ actor ContextSource {
 
 @MainActor
 final class ContextSections {
+    /// Only source locations are indexed; the presentation owns the text.
+    struct AutomaticLines: Sendable {
+        struct Location: Sendable { let row: Int; let pair: Int }
+        let pages: [Int: [Location]]
+        nonisolated init(file: FileDiff, rows: [PresentedRow]) {
+            let patchNumbers = Set(file.hunks.flatMap(\.lines).compactMap(\.oldNumber))
+            var pages: [Int: [Location]] = [:]
+            func append(_ pair: DiffPair, row: Int, offset: Int) {
+                guard let line = pair.old, line.kind == .context, let number = line.oldNumber,
+                      !patchNumbers.contains(number) else { return }
+                let linePages = Set([line.oldNumber, line.newNumber].compactMap { $0 }.map {
+                    ($0 - 1) / SyntaxService.pageSize
+                })
+                for page in linePages { pages[page, default: []].append(Location(row: row, pair: offset)) }
+            }
+            for (index, row) in rows.enumerated() {
+                switch row {
+                case .code(let pair): append(pair, row: index, offset: 0)
+                case .imports(let pairs):
+                    for (offset, pair) in pairs.enumerated() { append(pair, row: index, offset: offset) }
+                default: break
+                }
+            }
+            self.pages = pages
+        }
+        func lines(page: Int, rows: [PresentedRow]) -> [DiffLine] {
+            (pages[page] ?? []).compactMap { location in
+                switch rows[location.row] {
+                case .code(let pair): return pair.old
+                case .imports(let pairs): return pairs[location.pair].old
+                default:
+                    assertionFailure("A context line must belong to a source row.")
+                    NSLog("The context highlight index no longer matches the presentation.")
+                    return nil
+                }
+            }
+        }
+    }
+    enum Preparation {
+        case loading(Task<Void, Never>)
+        case ready(AutomaticLines)
+        case failed(String)
+    }
     enum State {
         case loading(Task<Void, Never>)
         case expanded([DiffPair])
@@ -23,12 +72,43 @@ final class ContextSections {
         case failed(String)
     }
     var load: ((FileDiff, UnchangedSection) async throws -> [DiffPair])?
+    var resolve: ((FileDiff) async throws -> [PresentedRow])?
     var onChange: ((String, Int) -> Void)?
+    var onResolved: ((String, [PresentedRow]?) -> Void)?
     private var entries: [String: [Int: State]] = [:]
+    private var preparations: [String: Preparation] = [:]
 
     func state(path: String, section: Int) -> State? { entries[path]?[section] }
+    func preparation(path: String) -> Preparation? { preparations[path] }
+
+    func prepare(file: FileDiff, retry: Bool = false) {
+        guard let resolve else { return }
+        switch preparations[file.path] {
+        case .loading, .ready: return
+        case .failed where !retry: return
+        default: break
+        }
+        guard !file.unchangedSections.isEmpty else { return }
+        let task = Task { [weak self] in
+            do {
+                let rows = try await resolve(file)
+                let index = await Task.detached { AutomaticLines(file: file, rows: rows) }.value
+                guard !Task.isCancelled, let self else { return }
+                self.preparations[file.path] = .ready(index)
+                self.onResolved?(file.path, rows)
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                NSLog("Could not resolve context for %@: %@", file.path, error.localizedDescription)
+                self.preparations[file.path] = .failed(error.localizedDescription)
+                self.onResolved?(file.path, nil)
+            }
+        }
+        preparations[file.path] = .loading(task)
+    }
 
     func clear() {
+        for case .loading(let task) in preparations.values { task.cancel() }
+        preparations.removeAll()
         for states in entries.values {
             for case .loading(let task) in states.values { task.cancel() }
         }
@@ -70,12 +150,14 @@ final class ContextSections {
         }
     }
 
-    func pageLines(path: String, page: Int) -> [DiffLine] {
+    func pageLines(path: String, page: Int, presentation: [PresentedRow]) -> [DiffLine] {
         let pageStart = page * SyntaxService.pageSize + 1
         let pageEnd = pageStart + SyntaxService.pageSize
-        guard let states = entries[path] else { return [] }
         var lines: [DiffLine] = []
-        for state in states.values {
+        if case .ready(let index) = preparations[path] {
+            lines = index.lines(page: page, rows: presentation)
+        }
+        for state in (entries[path] ?? [:]).values {
             guard case .expanded(let pairs) = state, let first = pairs.first else { continue }
             var offsets = IndexSet()
             for firstNumber in [first.old?.oldNumber, first.new?.newNumber].compactMap({ $0 }) {

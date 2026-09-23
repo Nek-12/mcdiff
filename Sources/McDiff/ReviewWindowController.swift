@@ -20,7 +20,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var snapshot: ReviewSnapshot?
     private var progress = ReviewProgress()
     private var files: [FileDiff] = []
-    private var presentations: [String: [PresentedRow]] = [:]
     private var sidebarIndices: [Int] = []
     private var sidebarNames: [String: String] = [:]
     private var focused = 0
@@ -451,11 +450,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                     let snapshot = try GitRepository(path: request.repository).load(request)
                     let progress = try store.loadProgress(identity: snapshot.identity)
                     let git = GitRepository(path: request.repository)
-                    let sources = try git.contents(snapshot: snapshot,
-                                                   files: snapshot.files.filter(DiffPresentation.supportsImportFolding))
                     let presentation = Dictionary(uniqueKeysWithValues: snapshot.files.map {
-                        ($0.path, DiffPresentation.rows(for: $0, oldSource: sources[$0.path]?.old,
-                                                      newSource: sources[$0.path]?.new))
+                        ($0.path, DiffPresentation.rows(for: $0))
                     })
                     var markdown: [String: MarkdownFileContent] = [:]
                     for file in snapshot.files where RenderedMarkdown.accepts(file.path) && !file.isBinary {
@@ -469,7 +465,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                     return (snapshot, progress, presentation, markdown)
                 }.value
                 guard let self else { return }
-                self.snapshot = result.0; self.progress = result.1; self.presentations = result.2
+                self.snapshot = result.0; self.progress = result.1
                 self.screen = .review
                 self.home.resumeTitle = result.0.title
                 self.sortFiles()
@@ -479,10 +475,11 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 self.searchMatchingFiles = nil
                 self.diff.setComments(self.progress.comments)
                 let contextSource = ContextSource(snapshot: result.0)
+                self.diff.contexts.resolve = { file in try await contextSource.presentation(file: file) }
                 self.diff.contexts.load = { file, section in
                     try await contextSource.lines(file: file, section: section)
                 }
-                self.diff.setFiles(self.files, presentations: self.presentations)
+                self.diff.setFiles(self.files, presentations: result.2)
                 self.rebuildSidebar()
                 self.updateComparisonPresentation()
                 self.window?.title = "McDiff — \(result.0.title)"

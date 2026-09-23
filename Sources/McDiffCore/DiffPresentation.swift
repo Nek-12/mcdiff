@@ -10,17 +10,13 @@ public enum PresentedRow: Sendable {
     case hunk(String)
     case code(DiffPair)
     case imports([DiffPair])
+    case context(UnchangedSection)
 }
 
 public enum DiffPresentation {
     private static let importExtensions: Set<String> = [
         "kt", "kts", "java", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "pyi"
     ]
-
-    public static func supportsImportFolding(_ file: FileDiff) -> Bool {
-        !file.isBinary && !file.isGitlink && !file.hunks.isEmpty &&
-            [file.oldPath, file.path].contains { importExtensions.contains(($0 as NSString).pathExtension.lowercased()) }
-    }
 
     /// Keeps the paired counterpart for word emphasis while ordering each
     /// contiguous edit as deletions followed by additions in a unified view.
@@ -45,20 +41,80 @@ public enum DiffPresentation {
         return result
     }
 
-    public static func rows(for file: FileDiff, oldSource: String? = nil, newSource: String? = nil) -> [PresentedRow] {
+    public static func rows(for file: FileDiff, oldSource: String? = nil, newSource: String? = nil,
+                            resolveContext: Bool = false) -> [PresentedRow] {
         var result: [PresentedRow] = []
         let oldExtension = (file.oldPath as NSString).pathExtension.lowercased()
         let newExtension = (file.path as NSString).pathExtension.lowercased()
         let oldContext = oldSource.map { sourceImportNumbers($0, file: file, ext: oldExtension, side: .old) }
         let newContext = newSource.map { sourceImportNumbers($0, file: file, ext: newExtension, side: .new) }
-        for hunk in file.hunks {
-            result.append(.hunk(hunk.header))
+        let sections = Dictionary(uniqueKeysWithValues: file.unchangedSections.map { ($0.beforeHunkIndex, $0) })
+        let sourceLines = resolveContext ? oldSource?.components(separatedBy: "\n") : nil
+        let sourceCount = sourceLines.map { $0.count - ($0.last == "" ? 1 : 0) } ?? 0
+        var pendingImports: [DiffPair] = []
+        func flushImports() {
+            if !pendingImports.isEmpty {
+                result.append(.imports(pendingImports))
+                pendingImports.removeAll(keepingCapacity: true)
+            }
+        }
+        func append(_ pair: DiffPair, oldImports: Set<Int>, newImports: Set<Int>) {
+            let oldFold = pair.old == nil || pair.old?.oldNumber.map(oldImports.contains) == true
+            let newFold = pair.new == nil || pair.new?.newNumber.map(newImports.contains) == true
+            if oldFold && newFold { pendingImports.append(pair) }
+            else { flushImports(); result.append(.code(pair)) }
+        }
+        func appendContext(before hunk: Int) {
+            guard let section = sections[hunk] else { return }
+            guard let sourceLines, let oldContext, let newContext else {
+                flushImports()
+                result.append(.context(section))
+                return
+            }
+            let count = section.count ?? (sourceCount - section.oldStart)
+            guard count > 0 else { return }
+            func isImport(_ offset: Int) -> Bool {
+                oldContext.contains(section.oldStart + offset + 1) &&
+                    newContext.contains(section.newStart + offset + 1)
+            }
+            // Imports own their complete source runs, including omitted lines.
+            // Only ordinary context is subject to the five-line disclosure rule.
+            var start = 0
+            while start < count {
+                let imports = isImport(start)
+                var end = start + 1
+                while end < count && isImport(end) == imports { end += 1 }
+                if !imports && end - start >= 5 {
+                    flushImports()
+                    result.append(.context(UnchangedSection(
+                        beforeHunkIndex: section.beforeHunkIndex,
+                        oldStart: section.oldStart + start, newStart: section.newStart + start,
+                        count: section.count == nil && end == count ? nil : end - start)))
+                } else {
+                    for offset in start..<end {
+                        let line = DiffLine(kind: .context, text: sourceLines[section.oldStart + offset],
+                                            oldNumber: section.oldStart + offset + 1,
+                                            newNumber: section.newStart + offset + 1)
+                        append(DiffPair(old: line, new: line), oldImports: oldContext, newImports: newContext)
+                    }
+                }
+                start = end
+            }
+        }
+        for (index, hunk) in file.hunks.enumerated() {
+            appendContext(before: index)
+            if !resolveContext {
+                flushImports()
+                result.append(.hunk(hunk.header))
+            }
             let oldLines = hunk.lines.filter { $0.kind != .addition }
             let newLines = hunk.lines.filter { $0.kind != .deletion }
-            let oldImports = includingWhitespace(oldContext ?? importLineNumbers(oldLines, ext: oldExtension, side: .old),
-                                                 lines: oldLines, side: .old)
-            let newImports = includingWhitespace(newContext ?? importLineNumbers(newLines, ext: newExtension, side: .new),
-                                                 lines: newLines, side: .new)
+            let oldImports = resolveContext ? oldContext ?? [] :
+                includingWhitespace(oldContext ?? (sections.isEmpty ? importLineNumbers(oldLines, ext: oldExtension, side: .old) : []),
+                                    lines: oldLines, side: .old)
+            let newImports = resolveContext ? newContext ?? [] :
+                includingWhitespace(newContext ?? (sections.isEmpty ? importLineNumbers(newLines, ext: newExtension, side: .new) : []),
+                                    lines: newLines, side: .new)
             var pairs: [DiffPair] = [], i = 0
             while i < hunk.lines.count {
                 let line = hunk.lines[i]
@@ -76,18 +132,13 @@ public enum DiffPresentation {
                     }
                 }
             }
-            var imports: [DiffPair] = []
             for pair in pairs {
-                let oldFold = pair.old == nil || pair.old?.oldNumber.map(oldImports.contains) == true
-                let newFold = pair.new == nil || pair.new?.newNumber.map(newImports.contains) == true
-                if oldFold && newFold { imports.append(pair) }
-                else {
-                    if !imports.isEmpty { result.append(.imports(imports)); imports = [] }
-                    result.append(.code(pair))
-                }
+                append(pair, oldImports: oldImports, newImports: newImports)
             }
-            if !imports.isEmpty { result.append(.imports(imports)) }
+            if !resolveContext { flushImports() }
         }
+        appendContext(before: file.hunks.count)
+        flushImports()
         return result
     }
 
@@ -181,7 +232,7 @@ public enum DiffPresentation {
             }
         }
         numbers.formUnion(importLineNumbers(segment, ext: ext, side: side))
-        return numbers
+        return includingWhitespace(numbers, lines: lines, side: side)
     }
 
     private static func importLineNumbers(_ lines: [DiffLine], ext: String, side: DiffSide) -> Set<Int> {
