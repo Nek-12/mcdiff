@@ -43,9 +43,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var toolbarItems: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     private let toolbarOrder: [NSToolbarItem.Identifier] = [
         .init("home"), .init("refresh"), .init("sidebarDivider"),
-        .init("navigation"), .space, .init("status"), .flexibleSpace,
-        .init("search"), .space, .init("wrap"), .space, .init("split"),
-        .space, .init("feedback")
+        .init("search"), .space, .init("status"), .flexibleSpace,
+        .init("wrap"), .space, .init("split"),
+        .space, .init("comments"), .init("feedback"), .space, .init("navigation")
     ]
     private let emptyToolbarOrder: [NSToolbarItem.Identifier] = [
         .init("welcomeSources"), .init("homeRefresh"), .init("status"), .flexibleSpace,
@@ -189,15 +189,16 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         }
         layoutButton = item("split", "Unified", "rectangle", #selector(layoutChanged), text: true)
         updateLayoutButton()
+        commentsButton = item("comments", "Comments", "message-square", #selector(showComments(_:)))
+        commentsButton.visibilityPriority = .high
         feedbackActions = NSToolbarItemGroup(itemIdentifier: .init("feedback"),
-            images: [toolbarIcon("message-square")!, toolbarIcon("copy")!, toolbarIcon("square.and.arrow.down")!],
-            selectionMode: .momentary, labels: ["Comments", "Copy review", "Export Markdown"],
+            images: [toolbarIcon("copy")!, toolbarIcon("square.and.arrow.down")!],
+            selectionMode: .momentary, labels: ["Copy review", "Export Markdown"],
             target: self, action: #selector(feedbackAction(_:)))
         feedbackActions.isBordered = true
         feedbackActions.autovalidates = false
         feedbackActions.visibilityPriority = .high
-        commentsButton = feedbackActions.subitems[0]
-        finishButton = feedbackActions.subitems[1]
+        finishButton = feedbackActions.subitems[0]
         toolbarItems[feedbackActions.itemIdentifier] = feedbackActions
         for group in [welcomeSources, navigation, wrapButton!, feedbackActions!] {
             for subitem in group.subitems { subitem.toolTip = subitem.label }
@@ -269,9 +270,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     @objc private func feedbackAction(_ sender: NSToolbarItemGroup) {
         switch sender.selectedIndex {
-        case 0: showComments(sender)
-        case 1: finishReview()
-        case 2: exportReview()
+        case 0: finishReview()
+        case 1: exportReview()
         default: break
         }
     }
@@ -533,9 +533,10 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let hasFile = files.indices.contains(focused)
         reviewNext?.isEnabled = hasFile && !busy
         finishButton?.isEnabled = snapshot != nil && !busy
-        feedbackActions?.subitems[2].isEnabled = snapshot != nil && !busy
+        feedbackActions?.subitems[1].isEnabled = snapshot != nil && !busy
         refreshButton?.isEnabled = snapshot != nil && !busy
         commentsButton?.toolTip = "\(progress.comments.count) comments"
+        commentsButton?.badge = .count(progress.comments.count)
         commentsButton?.isEnabled = !progress.comments.isEmpty && !busy
         layoutButton?.isEnabled = snapshot != nil && !busy
     }

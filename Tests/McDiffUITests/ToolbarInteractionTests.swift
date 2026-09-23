@@ -1,9 +1,57 @@
 import AppKit
-import McDiffCore
+@testable import McDiffCore
 import XCTest
 @testable import McDiff
 
 final class ToolbarInteractionTests: XCTestCase {
+    @MainActor
+    func testReviewToolbarCountsSavedCommentsAndKeepsReviewActionAtTrailingEdge() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let snapshot = try await Task.detached {
+            _ = try ProcessRunner.run("git", ["init", "-b", "main"], directory: directory.path)
+            _ = try ProcessRunner.run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "--allow-empty", "-m", "Initial"], directory: directory.path)
+            try Data("let value = 1\n".utf8).write(to: directory.appendingPathComponent("main.swift"))
+            return try GitRepository(path: directory.path).load(ComparisonRequest(repository: directory.path, base: "main"))
+        }.value
+        let store = try ReviewStore(directory: directory.appendingPathComponent(".git/review"))
+        let file = try XCTUnwrap(snapshot.files.first)
+        let comments = [
+            ReviewComment(path: file.path, side: .new, startLine: 1, endLine: 1,
+                          text: "Current comment", fingerprint: file.fingerprint),
+            ReviewComment(path: "removed.swift", side: .old, startLine: 2, endLine: 4,
+                          text: "Stale comment", fingerprint: "old")
+        ]
+        let controller = ReviewWindowController(github: GitHubClient(clientID: "test", credentials: ToolbarCredentials()))
+        let window = try XCTUnwrap(controller.window)
+        window.isReleasedWhenClosed = false
+        defer { window.delegate = nil; controller.close() }
+        let toolbar = try XCTUnwrap(window.toolbar)
+        for count in [2, 0, 1] {
+            try store.saveProgress(ReviewProgress(comments: Array(comments.prefix(count))), identity: snapshot.identity)
+            if controller.screen == .review { controller.showHome() }
+            controller.start(store: store, arguments: ["--repo", directory.path])
+            for _ in 0..<400 {
+                if controller.screen == .review { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(controller.screen, .review)
+            let commentItem = try XCTUnwrap(toolbar.items.first { $0.label == "Comments" })
+            XCTAssertEqual(commentItem.badge, .count(count))
+            XCTAssertEqual(commentItem.isEnabled, count > 0)
+            XCTAssertEqual(commentItem.toolTip, "\(count) comments")
+            let navigation = try XCTUnwrap(toolbar.items.last as? NSToolbarItemGroup)
+            XCTAssertEqual(navigation.subitems.last?.label, "Review & next")
+            let searchIndex = try XCTUnwrap(toolbar.items.firstIndex { $0 is NSSearchToolbarItem })
+            let commentIndex = try XCTUnwrap(toolbar.items.firstIndex { $0 === commentItem })
+            XCTAssertLessThan(searchIndex, commentIndex)
+            XCTAssertFalse(window.isVisible)
+        }
+    }
+
     @MainActor
     func testLayoutToggleShowsDestinationAndUpdatesViewport() throws {
         _ = NSApplication.shared
@@ -47,4 +95,9 @@ final class ToolbarInteractionTests: XCTestCase {
     private func descendants(of view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { descendants(of: $0) }
     }
+}
+
+private struct ToolbarCredentials: GitHubCredentialStore {
+    func load() throws -> Data? { nil }
+    func save(_ data: Data?) throws {}
 }
