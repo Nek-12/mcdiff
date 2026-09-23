@@ -23,7 +23,7 @@ public enum DiffParser {
             let start = i
             let paths = try headerPaths(String(lines[i].dropFirst(11)), line: i + 1)
             var oldPath = paths.0, path = paths.1, status = "M"
-            var binary = false, metadataChanged = false, hunks: [DiffHunk] = []
+            var binary = false, metadataChanged = false, gitlink = false, hunks: [DiffHunk] = []
             i += 1
             while i < lines.count && !lines[i].hasPrefix("diff --git ") {
                 let line = lines[i]
@@ -75,10 +75,13 @@ public enum DiffParser {
                     status = line.hasPrefix("rename") ? "R" : "C"; metadataChanged = true
                 } else if line.hasPrefix("new file mode ") {
                     status = "A"; metadataChanged = true
+                    gitlink = gitlink || line.split(separator: " ").last == "160000"
                 } else if line.hasPrefix("deleted file mode ") {
                     status = "D"; metadataChanged = true
+                    gitlink = gitlink || line.split(separator: " ").last == "160000"
                 } else if line.hasPrefix("old mode ") || line.hasPrefix("new mode ") {
                     metadataChanged = true
+                    gitlink = gitlink || line.split(separator: " ").last == "160000"
                 } else if line.hasPrefix("Binary files ") && line.hasSuffix(" differ") {
                     binary = true
                 } else if line == "GIT binary patch" {
@@ -87,7 +90,9 @@ public enum DiffParser {
                     i += 1
                     while i < lines.count && !lines[i].hasPrefix("diff --git ") { i += 1 }
                     continue
-                } else if line.hasPrefix("index ") || line.hasPrefix("similarity index ") || line.hasPrefix("dissimilarity index ") {
+                } else if line.hasPrefix("index ") {
+                    gitlink = gitlink || line.split(separator: " ").last == "160000"
+                } else if line.hasPrefix("similarity index ") || line.hasPrefix("dissimilarity index ") {
                     // Content identities and rename similarity are retained in the fingerprint.
                 } else { throw fail("Unrecognized patch record: \(line.prefix(120))") }
                 i += 1
@@ -99,7 +104,7 @@ public enum DiffParser {
             files.append(FileDiff(path: path, oldPath: oldPath, status: status, hunks: hunks, isBinary: binary,
                                   fingerprint: fingerprint, category: FileClassifier.classify(path),
                                   isFormattingOnly: !binary && FileClassifier.isFormattingOnly(path: path, hunks: hunks, metadataChanged: metadataChanged),
-                                  hasMetadataChanges: metadataChanged))
+                                  hasMetadataChanges: metadataChanged, isGitlink: gitlink))
         }
         return files
     }

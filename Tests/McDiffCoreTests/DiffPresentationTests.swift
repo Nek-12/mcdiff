@@ -28,7 +28,100 @@ final class DiffPresentationTests: XCTestCase {
             }
             XCTAssertEqual(folded.count, imports.count, ext)
             XCTAssertEqual(code.new?.text, "executeWork()")
+            let source = (imports + ["executeWork()"]).joined(separator: "\n")
+            let contextual = DiffPresentation.rows(for: file(ext, imports + ["executeWork()"]),
+                                                  oldSource: source, newSource: source)
+            guard contextual.count == 3, case .imports(let contextualImports) = contextual[1] else {
+                XCTFail("Expected source-backed imports for \(ext)"); continue
+            }
+            XCTAssertEqual(contextualImports.compactMap(\.new), folded.compactMap(\.new))
         }
+    }
+
+    func testPartialMultilineImportsUseFullSourceAndKeepOriginalLines() {
+        let examples: [(String, [String])] = [
+            ("go", ["import (", "", "    \"fmt\"", "    alias \"net/http\"", ")"]),
+            ("ts", ["import {", "", "    One,", "    Two", "} from 'module';"]),
+            ("rs", ["use std::{", "", "    io,", "    fmt::Debug,", "};"]),
+            ("py", ["from package import (", "", "    one,", "    two as alias,", ")"])
+        ]
+        for (ext, texts) in examples {
+            let full = file(ext, texts + ["", "executeWork()"])
+            let partial = FileDiff(path: full.path, hunks: [
+                DiffHunk(header: "partial", lines: Array(full.hunks[0].lines.dropFirst()))
+            ], fingerprint: "partial")
+            let source = (texts + ["", "executeWork()"]).joined(separator: "\n")
+            let rows = DiffPresentation.rows(for: partial, oldSource: source, newSource: source)
+            guard rows.count == 5, case .code(let leading) = rows[1], case .imports(let folded) = rows[2] else {
+                XCTFail("Expected partial import block for \(ext)"); continue
+            }
+            XCTAssertEqual(leading.new, full.hunks[0].lines[1])
+            XCTAssertEqual(folded.compactMap(\.old), Array(full.hunks[0].lines[2..<texts.count]))
+            XCTAssertEqual(folded.compactMap(\.new), Array(full.hunks[0].lines[2..<texts.count]))
+        }
+    }
+
+    func testFullSourceDoesNotMistakeQuotedExpressionsOrHiddenCommentsForImports() {
+        for texts in [
+            ["var values = []string{", "\"fmt\"", "\"net/http\"", "}"],
+            ["/*", "import (", "\"fmt\"", ")", "*/"],
+            ["var text = `", "import (", "\"fmt\"", ")", "`"]
+        ] {
+            let full = file("go", texts)
+            let partial = FileDiff(path: full.path, hunks: [
+                DiffHunk(header: "partial", lines: Array(full.hunks[0].lines.dropFirst().dropLast()))
+            ], fingerprint: "partial")
+            let source = texts.joined(separator: "\n")
+            let rows = DiffPresentation.rows(for: partial, oldSource: source, newSource: source)
+            XCTAssertFalse(rows.contains { if case .imports = $0 { return true }; return false })
+        }
+    }
+
+    func testFullSourceLexicalSeparatorsDoNotDisableRealImports() {
+        let texts = ["/* license */", "import (", "\"fmt\"", ")", "",
+                     "var text = `", "import \"fake\"", "`", "",
+                     "func work() {", "_ = \"ordinary\"", "}"]
+        let full = file("go", texts)
+        let source = texts.joined(separator: "\n")
+        let rows = DiffPresentation.rows(for: full, oldSource: source, newSource: source)
+        XCTAssertEqual(rows.compactMap { row -> [Int]? in
+            if case .imports(let pairs) = row { return pairs.compactMap { $0.new?.newNumber } }; return nil
+        }, [[2, 3, 4]])
+    }
+
+    func testFullSourceWhitespaceDoesNotBridgeHunksAndStaleSourceDoesNotFold() {
+        let texts = ["import \"fmt\""] + Array(repeating: "", count: 8) + ["import \"net/http\""]
+        let full = file("go", texts)
+        let partial = FileDiff(path: full.path, hunks: [
+            DiffHunk(header: "first", lines: Array(full.hunks[0].lines.prefix(2))),
+            DiffHunk(header: "second", lines: Array(full.hunks[0].lines.suffix(2)))
+        ], fingerprint: "partial")
+        let source = texts.joined(separator: "\n")
+        let rows = DiffPresentation.rows(for: partial, oldSource: source, newSource: source)
+        XCTAssertEqual(rows.compactMap { row -> [Int]? in
+            if case .imports(let pairs) = row { return pairs.compactMap { $0.new?.newNumber } }; return nil
+        }, [[1], [10]])
+        XCTAssertEqual(rows.compactMap { row -> Int? in
+            if case .code(let pair) = row { return pair.new?.newNumber }; return nil
+        }, [2, 9])
+        let stale = DiffPresentation.rows(for: partial, oldSource: source, newSource: "\n" + source)
+        XCTAssertFalse(stale.contains { if case .imports = $0 { return true }; return false })
+    }
+
+    func testPartialMultilineImportKeepsHunkEdgeWhitespaceVisible() {
+        let texts = ["import (", "\"one\"", "", "\"two\"", "", "\"three\"", ")"]
+        let full = file("go", texts)
+        let partial = FileDiff(path: full.path, hunks: [
+            DiffHunk(header: "partial", lines: Array(full.hunks[0].lines[2...4]))
+        ], fingerprint: "partial")
+        let source = texts.joined(separator: "\n")
+        let rows = DiffPresentation.rows(for: partial, oldSource: source, newSource: source)
+        XCTAssertEqual(rows.compactMap { row -> [Int]? in
+            if case .imports(let pairs) = row { return pairs.compactMap { $0.new?.newNumber } }; return nil
+        }, [[4]])
+        XCTAssertEqual(rows.compactMap { row -> Int? in
+            if case .code(let pair) = row { return pair.new?.newNumber }; return nil
+        }, [3, 5])
     }
 
     func testWhitespaceBetweenImportsFoldsButSurroundingWhitespaceStaysVisible() {
@@ -95,6 +188,9 @@ final class DiffPresentationTests: XCTestCase {
         ] {
             let rows = DiffPresentation.rows(for: file(ext, texts))
             XCTAssertFalse(rows.contains { if case .imports = $0 { return true }; return false }, "\(ext): \(texts)")
+            let source = texts.joined(separator: "\n")
+            let contextual = DiffPresentation.rows(for: file(ext, texts), oldSource: source, newSource: source)
+            XCTAssertFalse(contextual.contains { if case .imports = $0 { return true }; return false }, "\(ext): \(texts)")
             XCTAssertEqual(rows.compactMap { row -> String? in
                 if case .code(let pair) = row { return pair.new?.text }; return nil
             }, texts)

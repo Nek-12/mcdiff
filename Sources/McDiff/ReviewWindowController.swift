@@ -450,8 +450,13 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 let result = try await Task.detached(priority: .userInitiated) {
                     let snapshot = try GitRepository(path: request.repository).load(request)
                     let progress = try store.loadProgress(identity: snapshot.identity)
-                    let presentation = Dictionary(uniqueKeysWithValues: snapshot.files.map { ($0.path, DiffPresentation.rows(for: $0)) })
                     let git = GitRepository(path: request.repository)
+                    let sources = try git.contents(snapshot: snapshot,
+                                                   files: snapshot.files.filter(DiffPresentation.supportsImportFolding))
+                    let presentation = Dictionary(uniqueKeysWithValues: snapshot.files.map {
+                        ($0.path, DiffPresentation.rows(for: $0, oldSource: sources[$0.path]?.old,
+                                                      newSource: sources[$0.path]?.new))
+                    })
                     var markdown: [String: MarkdownFileContent] = [:]
                     for file in snapshot.files where RenderedMarkdown.accepts(file.path) && !file.isBinary {
                         do {

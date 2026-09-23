@@ -110,23 +110,39 @@ final class FlippedView: NSView {
 /// A layer mask softens the scroll boundary without placing a painted overlay on glass.
 final class FadingScrollView: NSScrollView {
     private let fade = CAGradientLayer()
+    /// Distances from the top edge; nil disables only the top fade.
+    var topFade: Range<CGFloat>? = 0..<16 {
+        didSet { if topFade != oldValue { updateFade() } }
+    }
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         scrollerStyle = NSScroller.preferredScrollerStyle
         autohidesScrollers = true
         wantsLayer = true
-        fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
-        fade.startPoint = CGPoint(x: 0.5, y: 0)
-        fade.endPoint = CGPoint(x: 0.5, y: 1)
         layer?.mask = fade
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layout() {
         super.layout()
+        updateFade()
+    }
+    private func updateFade() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         fade.frame = bounds
-        let edge = min(0.5, 16 / max(1, bounds.height))
-        fade.locations = [0, NSNumber(value: Double(edge)), NSNumber(value: Double(1 - edge)), 1]
+        fade.startPoint = CGPoint(x: 0.5, y: isFlipped ? 0 : 1)
+        fade.endPoint = CGPoint(x: 0.5, y: isFlipped ? 1 : 0)
+        let height = max(1, bounds.height)
+        let bottom = max(0.5, 1 - 16 / height)
+        if let topFade {
+            let start = min(bottom, max(0, topFade.lowerBound / height))
+            let end = min(bottom, max(start, topFade.upperBound / height))
+            fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor,
+                           NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            fade.locations = [0, start, start, end, bottom, 1].map { NSNumber(value: Double($0)) }
+        } else {
+            fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            fade.locations = [0, bottom, 1].map { NSNumber(value: Double($0)) }
+        }
         CATransaction.commit()
     }
 }

@@ -13,6 +13,15 @@ public enum PresentedRow: Sendable {
 }
 
 public enum DiffPresentation {
+    private static let importExtensions: Set<String> = [
+        "kt", "kts", "java", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "pyi"
+    ]
+
+    public static func supportsImportFolding(_ file: FileDiff) -> Bool {
+        !file.isBinary && !file.isGitlink && !file.hunks.isEmpty &&
+            importExtensions.contains((file.path as NSString).pathExtension.lowercased())
+    }
+
     /// Keeps the paired counterpart for word emphasis while ordering each
     /// contiguous edit as deletions followed by additions in a unified view.
     public static func sourceRows(_ pairs: [DiffPair], layout: DiffLayout) -> [(pair: DiffPair, side: DiffSide?)] {
@@ -36,13 +45,19 @@ public enum DiffPresentation {
         return result
     }
 
-    public static func rows(for file: FileDiff) -> [PresentedRow] {
+    public static func rows(for file: FileDiff, oldSource: String? = nil, newSource: String? = nil) -> [PresentedRow] {
         var result: [PresentedRow] = []
         let ext = (file.path as NSString).pathExtension.lowercased()
+        let oldContext = oldSource.map { sourceImportNumbers($0, file: file, ext: ext, side: .old) }
+        let newContext = newSource.map { sourceImportNumbers($0, file: file, ext: ext, side: .new) }
         for hunk in file.hunks {
             result.append(.hunk(hunk.header))
-            let oldImports = importLineNumbers(hunk.lines.filter { $0.kind != .addition }, ext: ext, side: .old)
-            let newImports = importLineNumbers(hunk.lines.filter { $0.kind != .deletion }, ext: ext, side: .new)
+            let oldLines = hunk.lines.filter { $0.kind != .addition }
+            let newLines = hunk.lines.filter { $0.kind != .deletion }
+            let oldImports = includingWhitespace(oldContext ?? importLineNumbers(oldLines, ext: ext, side: .old),
+                                                 lines: oldLines, side: .old)
+            let newImports = includingWhitespace(newContext ?? importLineNumbers(newLines, ext: ext, side: .new),
+                                                 lines: newLines, side: .new)
             var pairs: [DiffPair] = [], i = 0
             while i < hunk.lines.count {
                 let line = hunk.lines[i]
@@ -79,13 +94,101 @@ public enum DiffPresentation {
         text.range(of: pattern, options: .regularExpression) != nil
     }
 
+    private static func includingWhitespace(_ imports: Set<Int>, lines: [DiffLine], side: DiffSide) -> Set<Int> {
+        var result: Set<Int> = [], whitespace: [Int] = []
+        var followsImport = false
+        for line in lines {
+            guard let number = side == .old ? line.oldNumber : line.newNumber else { continue }
+            if line.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                if followsImport { whitespace.append(number) }
+            } else if imports.contains(number) {
+                result.insert(number)
+                if followsImport { result.formUnion(whitespace) }
+                followsImport = true
+                whitespace.removeAll(keepingCapacity: true)
+            } else {
+                followsImport = false
+                whitespace.removeAll(keepingCapacity: true)
+            }
+        }
+        return result
+    }
+
+    private static func sourceImportNumbers(_ source: String, file: FileDiff, ext: String, side: DiffSide) -> Set<Int> {
+        guard importExtensions.contains(ext) else { return [] }
+        let texts = source.components(separatedBy: "\n")
+        // The working file can change after Git produced the patch. Never fold
+        // lines using source context from a different version of that file.
+        guard file.hunks.flatMap(\.lines).allSatisfy({ line in
+            guard let number = side == .old ? line.oldNumber : line.newNumber else { return true }
+            return number > 0 && number <= texts.count && texts[number - 1] == line.text
+        }) else { return [] }
+        let lines = texts.enumerated().map {
+            DiffLine(kind: .context, text: $0.element, oldNumber: $0.offset + 1, newNumber: $0.offset + 1)
+        }
+        // Scan from the start of the file so a hunk inside a string/comment
+        // cannot masquerade as imports. Unsafe lines also separate import runs.
+        var numbers: Set<Int> = [], segment: [DiffLine] = []
+        var delimiter: String?
+        var blockDepth = 0
+        var quote: Character?
+        var escaped = false
+        for line in lines {
+            var safe = delimiter == nil && quote == nil
+            let text = line.text
+            var index = text.startIndex
+            while index < text.endIndex {
+                let rest = text[index...], character = text[index]
+                if let active = delimiter {
+                    safe = false
+                    if active == "*/" && rest.hasPrefix("/*") {
+                        blockDepth += 1
+                        index = text.index(index, offsetBy: 2)
+                    } else if rest.hasPrefix(active) && !escaped {
+                        if active == "*/" { blockDepth -= 1 }
+                        if blockDepth == 0 { delimiter = nil }
+                        index = text.index(index, offsetBy: active.count)
+                    } else {
+                        escaped = active != "*/" && !(active == "`" && ext == "go") && character == "\\" && !escaped
+                        index = text.index(after: index)
+                    }
+                } else if let active = quote {
+                    if character == active && !escaped { quote = nil }
+                    escaped = character == "\\" && !escaped
+                    index = text.index(after: index)
+                } else if rest.hasPrefix("//") || (["py", "pyi"].contains(ext) && character == "#") {
+                    safe = false
+                    break
+                } else if rest.hasPrefix("/*") {
+                    safe = false; delimiter = "*/"; blockDepth = 1
+                    index = text.index(index, offsetBy: 2)
+                } else if rest.hasPrefix("\"\"\"") || rest.hasPrefix("'''") || character == "`" {
+                    safe = false
+                    delimiter = character == "`" ? "`" : String(repeating: character, count: 3)
+                    index = text.index(index, offsetBy: delimiter!.count)
+                } else {
+                    if character == "\"" || character == "'" { quote = character }
+                    index = text.index(after: index)
+                }
+            }
+            if quote != nil { safe = false }
+            escaped = false
+            if safe { segment.append(line) }
+            else {
+                numbers.formUnion(importLineNumbers(segment, ext: ext, side: side))
+                segment.removeAll(keepingCapacity: true)
+            }
+        }
+        numbers.formUnion(importLineNumbers(segment, ext: ext, side: side))
+        return numbers
+    }
+
     private static func importLineNumbers(_ lines: [DiffLine], ext: String, side: DiffSide) -> Set<Int> {
-        guard ["kt", "kts", "java", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "pyi"].contains(ext) else { return [] }
+        guard importExtensions.contains(ext) else { return [] }
         // Without full-file lexical state, multiline string/comment hunks are not
         // safe candidates for folding source-looking text.
         guard !lines.contains(where: { $0.text.contains("\"\"\"") || $0.text.contains("'''") || $0.text.contains("`") || $0.text.contains("/*") || $0.text.contains("*/") }) else { return [] }
         var numbers: Set<Int> = [], i = 0
-        var previousImportEnd: Int?
         while i < lines.count {
             guard lines[i].text.utf16.count <= 32_768 else { i += 1; continue }
             var statement = lines[i].text.trimmingCharacters(in: .whitespaces)
@@ -127,16 +230,9 @@ public enum DiffPresentation {
                     }
                 }
                 if complete(statement) {
-                    var foldStart = start
-                    if let previousImportEnd,
-                       lines[(previousImportEnd + 1)..<start].allSatisfy({ $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
-                        // Whitespace belongs to the fold only when imports bound it on both sides.
-                        foldStart = previousImportEnd + 1
-                    }
-                    for line in lines[foldStart...end] {
+                    for line in lines[start...end] {
                         if let number = side == .old ? line.oldNumber : line.newNumber { numbers.insert(number) }
                     }
-                    previousImportEnd = end
                     i = end + 1; continue
                 }
             }

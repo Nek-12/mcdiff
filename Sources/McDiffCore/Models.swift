@@ -30,6 +30,8 @@ public struct FileDiff: Identifiable, Sendable {
     public let status: String
     public let hunks: [DiffHunk]
     public let isBinary: Bool
+    /// At least one comparison side is a Git commit link, not file source.
+    public let isGitlink: Bool
     public let fingerprint: String
     public let category: FileCategory
     public let isFormattingOnly: Bool
@@ -39,11 +41,12 @@ public struct FileDiff: Identifiable, Sendable {
     public var isRemovalOnly: Bool { status == "D" || (additions == 0 && deletions > 0) }
     public init(path: String, oldPath: String? = nil, status: String = "M", hunks: [DiffHunk],
                 isBinary: Bool = false, fingerprint: String, category: FileCategory = .production,
-                isFormattingOnly: Bool = false, hasMetadataChanges: Bool = false) {
+                isFormattingOnly: Bool = false, hasMetadataChanges: Bool = false, isGitlink: Bool = false) {
         self.path = path; self.oldPath = oldPath ?? path; self.status = status; self.hunks = hunks
         self.isBinary = isBinary; self.fingerprint = fingerprint; self.category = category
         self.isFormattingOnly = isFormattingOnly
         self.hasMetadataChanges = hasMetadataChanges
+        self.isGitlink = isGitlink
     }
 }
 

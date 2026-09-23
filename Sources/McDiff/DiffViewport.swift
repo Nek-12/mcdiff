@@ -50,6 +50,7 @@ final class HighlightBox: NSObject {
 final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     let scroll = FadingScrollView()
     let table = DiffTable()
+    let pinnedHeader = PinnedFileHeader()
     private var horizontalMetrics: [String: FileHorizontalMetrics] = [:]
     var files: [FileDiff] = []
     var presentations: [String: [PresentedRow]] = [:]
@@ -235,7 +236,11 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         scroll.backgroundColor = Style.canvas
         scroll.contentView.postsBoundsChangedNotifications = true
         addSubview(scroll)
+        pinnedHeader.cell.owner = self
+        pinnedHeader.isHidden = true
+        addSubview(pinnedHeader)
         observers.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
+            self?.updatePinnedHeader()
             // AppKit also posts while calculating row geometry. Observe after that
             // transaction so focus changes never reenter table layout.
             DispatchQueue.main.async { self?.visibleChanged() }
@@ -268,6 +273,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             redraw()
             pumpMarkdown()
         }
+        updatePinnedHeader()
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -577,8 +583,36 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
                 $0.needsDisplay = true
             }
         }
+        updatePinnedHeader()
+    }
+    private func updatePinnedHeader() {
+        let top = scroll.documentVisibleRect.minY
+        let row = table.row(at: NSPoint(x: 0, y: max(0, top)))
+        guard rows.indices.contains(row), let header = headerRows[rows[row].file] else {
+            pinnedHeader.isHidden = true
+            scroll.topFade = nil
+            return
+        }
+        let headerRect = table.rect(ofRow: header)
+        let next = headerRows[rows[row].file + 1].map { table.rect(ofRow: $0).minY } ?? table.bounds.maxY
+        let height = headerRect.height
+        let offset = min(0, next - top - height)
+        let visibleHeight = max(0, height + offset)
+        pinnedHeader.isHidden = top < headerRect.minY || visibleHeight == 0
+        pinnedHeader.frame = NSRect(x: scroll.frame.minX, y: scroll.frame.maxY - height,
+                                    width: scroll.contentSize.width, height: height)
+        pinnedHeader.cell.frame = NSRect(x: 0, y: offset, width: pinnedHeader.bounds.width, height: height)
+        pinnedHeader.cell.rowIndex = header
+        pinnedHeader.cell.updateHeaderButton()
+        pinnedHeader.cell.needsDisplay = true
+        pinnedHeader.needsDisplay = true
+        // During push-off the incoming header immediately follows the outgoing
+        // one. There is no exposed code to fade between them.
+        scroll.topFade = pinnedHeader.isHidden || top <= headerRect.minY || next - top <= height
+            ? nil : visibleHeight..<min(visibleHeight + 16, next - top)
     }
     private func visibleChanged() {
+        updatePinnedHeader()
         let range = table.rows(in: scroll.documentVisibleRect)
         guard range.location != NSNotFound, range.length > 0, !rows.isEmpty else { return }
         let start = min(range.location, rows.count - 1)
@@ -652,7 +686,12 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private func preservingScrollAnchor(row: Int? = nil, _ update: () -> Void) {
         let visible = table.rows(in: scroll.documentVisibleRect)
         let anchor = row ?? (visible.location != NSNotFound && visible.location < rows.count ? visible.location : nil)
-        let inset = anchor.map { scroll.documentVisibleRect.minY - table.rect(ofRow: $0).minY } ?? 0
+        let inset = anchor.map {
+            if row != nil, !pinnedHeader.isHidden, pinnedHeader.cell.rowIndex == $0 {
+                return -pinnedHeader.cell.frame.minY
+            }
+            return scroll.documentVisibleRect.minY - table.rect(ofRow: $0).minY
+        } ?? 0
         update()
         table.layoutSubtreeIfNeeded()
         if let anchor {
@@ -1010,6 +1049,30 @@ private final class VerticalClipView: NSClipView {
     }
 }
 
+final class PinnedFileHeader: NSView {
+    let cell = DiffCell()
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        addSubview(cell)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        cell.frame.intersection(bounds).fill()
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+    override func scrollWheel(with event: NSEvent) {
+        cell.owner?.table.scrollWheel(with: event)
+    }
+}
+
 final class DiffCell: NSView {
     weak var owner: DiffViewport?
     var rowIndex = 0
@@ -1017,6 +1080,14 @@ final class DiffCell: NSView {
     private var reviewCheckbox: AnimatedCheckbox?
     override var isFlipped: Bool { true }
 
+    override func mouseDown(with event: NSEvent) {
+        guard let owner, owner.rows.indices.contains(rowIndex), case .file = owner.rows[rowIndex].content else {
+            super.mouseDown(with: event)
+            return
+        }
+        owner.stopNavigation()
+        owner.click(row: rowIndex, point: .zero, shift: false)
+    }
 
     func updateHeaderButton() {
         var disclosureTip: String?
