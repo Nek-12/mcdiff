@@ -249,11 +249,14 @@ public enum DiffPresentation {
             func complete(_ s: String) -> Bool {
                 switch ext {
                 case "kt", "kts":
-                    return matches(s, #"^import [\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}\p{N}_]+)*(?:\.\*)?(?: as [\p{L}_][\p{L}\p{N}_]*)?;?$"#)
+                    return matches(s, #"^package\s+[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*;?$"#) ||
+                        matches(s, #"^import [\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}\p{N}_]+)*(?:\.\*)?(?: as [\p{L}_][\p{L}\p{N}_]*)?;?$"#)
                 case "java":
-                    return matches(s, #"^import (?:static )?[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}\p{N}_$]+)*(?:\.\*)?;$"#)
+                    return matches(s, #"^package\s+[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}_$][\p{L}\p{N}_$]*)*;$"#) ||
+                        matches(s, #"^import (?:static )?[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}\p{N}_$]+)*(?:\.\*)?;$"#)
                 case "go":
-                    return matches(s, #"^import\s+(?:(?:[\p{L}_][\p{L}\p{N}_]*|\.)\s+)?"[^"\n]+"\s*$"#) ||
+                    return matches(s, #"^package\s+[\p{L}_][\p{L}\p{N}_]*;?$"#) ||
+                        matches(s, #"^import\s+(?:(?:[\p{L}_][\p{L}\p{N}_]*|\.)\s+)?"[^"\n]+"\s*$"#) ||
                         matches(s, #"^import\s*\(\s*(?:(?:(?:[\p{L}_][\p{L}\p{N}_]*|\.)\s+)?"[^"\n]+"\s*)+\)$"#)
                 case "py", "pyi":
                     let names = #"[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*(?:\s+as\s+[\p{L}_][\p{L}\p{N}_]*)?"#
@@ -266,6 +269,7 @@ public enum DiffPresentation {
                 }
             }
             let prefix = statement.hasPrefix("import ") || statement == "import(" || statement == "import (" ||
+                (["kt", "kts", "java", "go"].contains(ext) && matches(statement, #"^package\s"#)) ||
                 (["py", "pyi"].contains(ext) && statement.hasPrefix("from ")) ||
                 (ext == "rs" && (statement.hasPrefix("use ") || statement.hasPrefix("pub use ") || statement.hasPrefix("pub(")))
             if prefix {

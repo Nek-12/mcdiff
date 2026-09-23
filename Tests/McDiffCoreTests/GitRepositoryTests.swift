@@ -142,7 +142,7 @@ final class GitRepositoryTests: XCTestCase {
             if case .imports(let pairs) = row { return pairs }; return nil
         }
         XCTAssertEqual(imports.count, 1)
-        XCTAssertEqual(imports.first?.compactMap { $0.new?.newNumber }, Array(3...44))
+        XCTAssertEqual(imports.first?.compactMap { $0.new?.newNumber }, Array(1...44))
         let sections = rows.compactMap { row -> UnchangedSection? in
             if case .context(let section) = row { return section }; return nil
         }
@@ -381,8 +381,8 @@ final class GitRepositoryTests: XCTestCase {
             XCTAssertTrue(folded.contains { $0.old?.text == "    alias \"old\"" })
             XCTAssertTrue(folded.contains { $0.new?.text == ")" })
             XCTAssertFalse(folded.contains { $0.new?.text == "func work() {}" })
-            XCTAssertEqual(folded.compactMap { $0.old?.text }, Array(oldLines.dropFirst(2).dropLast(2)))
-            XCTAssertEqual(folded.compactMap { $0.new?.text }, Array(newLines.dropFirst(2).dropLast(2)))
+            XCTAssertEqual(folded.compactMap { $0.old?.text }, Array(oldLines.dropLast(2)))
+            XCTAssertEqual(folded.compactMap { $0.new?.text }, Array(newLines.dropLast(2)))
             XCTAssertEqual(DiffPresentation.sourceRows(folded, layout: .unified).filter {
                 $0.pair.old?.kind == .context
             }.count, folded.filter { $0.old?.kind == .context }.count)

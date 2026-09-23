@@ -29,6 +29,72 @@ final class ContextPresentationTests: XCTestCase {
         rows.compactMap { if case .code(let pair) = $0 { return pair }; return nil }
     }
 
+    func testPackageDeclarationJoinsImportsAcrossOmittedContext() throws {
+        for (ext, package, changedPackage, imported) in [
+            ("go", "package sample", "package changed", "import \"fmt\""),
+            ("kt", "package sample.app", "package changed.app", "import sample.Type"),
+            ("kts", "package sample.app;", "package changed.app;", "import sample.Type"),
+            ("java", "package sample.app;", "package changed.app;", "import sample.Type;")
+        ] {
+            let old = [package, "", "", imported, "", "code"]
+            var new = old
+            new[0] = changedPackage
+            let file = file(path: "source.\(ext)", old: old, new: new, ranges: [0..<1])
+            let rows = resolve(file, old: old, new: new)
+            let folded = try XCTUnwrap(imports(rows).first, ext)
+            XCTAssertEqual(imports(rows).count, 1, ext)
+            XCTAssertEqual(folded.compactMap { $0.old?.text }, Array(old.prefix(4)), ext)
+            XCTAssertEqual(folded.compactMap { $0.new?.text }, Array(new.prefix(4)), ext)
+            XCTAssertEqual(folded.first?.old?.kind, .deletion, ext)
+            XCTAssertEqual(folded.first?.new?.kind, .addition, ext)
+            XCTAssertEqual(code(rows).compactMap { $0.new?.text }, ["", "code"], ext)
+        }
+    }
+
+    func testPackageOnlyAndAddedFileHeadersAreFoldable() {
+        for (ext, declaration) in [("go", "package sample"), ("kt", "package sample.app"),
+                                   ("java", "package sample.app;")] {
+            let file = FileDiff(path: "source.\(ext)", status: "A", hunks: [
+                DiffHunk(header: "", lines: [
+                    DiffLine(kind: .addition, text: declaration, oldNumber: nil, newNumber: 1),
+                    DiffLine(kind: .addition, text: "", oldNumber: nil, newNumber: 2),
+                    DiffLine(kind: .addition, text: "code", oldNumber: nil, newNumber: 3)
+                ])
+            ], fingerprint: "added")
+            let rows = DiffPresentation.rows(for: file)
+            XCTAssertEqual(imports(rows).flatMap { $0.compactMap { $0.new?.text } }, [declaration], ext)
+            XCTAssertEqual(code(rows).compactMap { $0.new?.text }, ["", "code"], ext)
+        }
+    }
+
+    func testPackageLikeTextInCommentsStringsOrOtherLanguagesStaysVisible() {
+        for (ext, old) in [
+            ("kt", ["val text = \"\"\"", "package sample", "\"\"\"", "code"]),
+            ("go", ["var text = `", "package sample", "`", "code"]),
+            ("java", ["/*", "package sample;", "*/", "code"]),
+            ("ts", ["package sample", "", "import Thing from 'thing';", "code"])
+        ] {
+            var new = old
+            new[3] = "changed code"
+            let file = file(path: "source.\(ext)", old: old, new: new, ranges: [3..<4])
+            let rows = resolve(file, old: old, new: new)
+            XCTAssertFalse(imports(rows).flatMap { $0 }.contains { $0.new?.text.hasPrefix("package ") == true }, ext)
+            XCTAssertTrue(code(rows).contains { $0.new?.text.hasPrefix("package ") == true }, ext)
+        }
+    }
+
+    func testCommentsSeparatePackageAndImportFolds() {
+        let old = ["package sample", "", "// Why this dependency exists", "", "import sample.Type", "", "code"]
+        var new = old
+        new[6] = "changed code"
+        let file = file(path: "source.kt", old: old, new: new, ranges: [6..<7])
+        let rows = resolve(file, old: old, new: new)
+        XCTAssertEqual(imports(rows).map { $0.compactMap { $0.new?.text } },
+                       [["package sample"], ["import sample.Type"]])
+        XCTAssertEqual(code(rows).compactMap { $0.new?.text },
+                       ["", "// Why this dependency exists", "", "", "changed code"])
+    }
+
     func testFiveLineThresholdAtBeginningBetweenHunksAndAtEOF() {
         for count in 1...5 {
             let old = (1...(count * 3 + 2)).map { "let value\($0) = \($0)" }
@@ -61,11 +127,11 @@ final class ContextPresentationTests: XCTestCase {
         let rows = resolve(file, old: old, new: new)
         let folded = try XCTUnwrap(imports(rows).first)
         XCTAssertEqual(imports(rows).count, 1)
-        XCTAssertEqual(folded.compactMap { $0.old?.oldNumber }, Array(3...44))
-        XCTAssertEqual(folded.compactMap { $0.new?.newNumber }, Array(3...44))
+        XCTAssertEqual(folded.compactMap { $0.old?.oldNumber }, Array(1...44))
+        XCTAssertEqual(folded.compactMap { $0.new?.newNumber }, Array(1...44))
         XCTAssertEqual(folded.filter { $0.old?.kind == .deletion }.count, 2)
         XCTAssertEqual(sections(rows).map(\.oldStart), [44])
-        XCTAssertEqual(code(rows).compactMap { $0.new?.newNumber }, [1, 2])
+        XCTAssertTrue(code(rows).isEmpty)
     }
 
     func testWhitespaceBetweenImportsBelongsToFoldButCommentsAndSurroundingSpaceDoNot() {
