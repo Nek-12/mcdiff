@@ -32,7 +32,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private let searchItem = NSSearchToolbarItem(itemIdentifier: .init("search"))
     private var searchMatchingFiles: Set<Int>?
     private let spinner = NSProgressIndicator()
-    private var reviewNext: NSToolbarItem!
+    private var reviewActions: NSToolbarItemGroup!
     private var finishButton: NSToolbarItem!
     private var refreshButton: NSToolbarItem!
     private var commentsButton: NSToolbarItem!
@@ -45,7 +45,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         .init("home"), .init("refresh"), .init("sidebarDivider"),
         .init("search"), .space, .init("status"), .flexibleSpace,
         .init("wrap"), .space, .init("split"),
-        .space, .init("finish"), .space, .init("comments"), .init("navigation")
+        .space, .init("finish"), .space, .init("navigation")
     ]
     private let emptyToolbarOrder: [NSToolbarItem.Identifier] = [
         .init("welcomeSources"), .init("homeRefresh"), .init("status"), .flexibleSpace,
@@ -173,11 +173,16 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         toolbarItems[welcomeSources.itemIdentifier] = welcomeSources
         let divider = NSTrackingSeparatorToolbarItem(identifier: .init("sidebarDivider"), splitView: splitController.splitView, dividerIndex: 0)
         toolbarItems[divider.itemIdentifier] = divider
-        let navigation = NSToolbarItemGroup(itemIdentifier: .init("navigation"),
-            images: [toolbarIcon("arrow-down")!, toolbarIcon("arrow-up")!, toolbarIcon("check")!], selectionMode: .momentary,
-            labels: ["Next file", "Previous file", "Review & next"], target: self, action: #selector(navigateToolbar(_:)))
-        reviewNext = navigation
-        reviewNext.visibilityPriority = .high
+        let navigation = NSToolbarItemGroup(itemIdentifier: .init("navigation"))
+        commentsButton = item("comments", "Comments", "message-square", #selector(showComments(_:)))
+        navigation.subitems = [
+            commentsButton,
+            item("next", "Next file", "arrow-down", #selector(nextFile)),
+            item("previous", "Previous file", "arrow-up", #selector(previousFile)),
+            item("reviewNext", "Review & next", "check", #selector(markAndNext))
+        ]
+        reviewActions = navigation
+        reviewActions.visibilityPriority = .high
         wrapButton = NSToolbarItemGroup(itemIdentifier: .init("wrap"), titles: ["Wrap"],
             selectionMode: .selectAny, labels: ["Soft wrap"], target: self, action: #selector(wrapChanged))
         wrapButton.subitems.first?.image = toolbarIcon("arrow.turn.down.left")
@@ -188,17 +193,15 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         }
         layoutButton = item("split", "Unified", "rectangle", #selector(layoutChanged), text: true)
         updateLayoutButton()
-        commentsButton = item("comments", "Comments", "message-square", #selector(showComments(_:)))
-        commentsButton.visibilityPriority = .high
         finishButton = item("finish", "Finish review", "check-check", #selector(finishReview), text: true)
         finishButton.visibilityPriority = .high
         for group in [welcomeSources, navigation, wrapButton!] {
             for subitem in group.subitems { subitem.toolTip = subitem.label }
         }
         welcomeSources.subitems[0].toolTip = "Open comparison (⌘O)"
-        navigation.subitems[0].toolTip = "Next file (⌥↓)"
-        navigation.subitems[1].toolTip = "Previous file (⌥↑)"
-        navigation.subitems[2].toolTip = "Mark reviewed and go to the next unreviewed file (⌘J)"
+        navigation.subitems[1].toolTip = "Next file (⌥↓)"
+        navigation.subitems[2].toolTip = "Previous file (⌥↑)"
+        navigation.subitems[3].toolTip = "Mark reviewed and go to the next unreviewed file (⌘J)"
         wrapButton.subitems.first?.toolTip = "Toggle soft wrapping of long lines"
 
         spinner.style = .spinning; spinner.controlSize = .small; spinner.isDisplayedWhenStopped = false
@@ -249,14 +252,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         switch sender.selectedIndex {
         case 0: openComparison()
         case 1: showRecent(sender)
-        default: break
-        }
-    }
-    @objc private func navigateToolbar(_ sender: NSToolbarItemGroup) {
-        switch sender.selectedIndex {
-        case 0: nextFile()
-        case 1: previousFile()
-        case 2: markAndNext()
         default: break
         }
     }
@@ -515,7 +510,10 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     private func updateActions() {
         let hasFile = files.indices.contains(focused)
-        reviewNext?.isEnabled = hasFile && !busy
+        reviewActions?.isEnabled = (hasFile || !progress.comments.isEmpty) && !busy
+        for item in reviewActions?.subitems.dropFirst() ?? [] {
+            item.isEnabled = hasFile && !busy
+        }
         finishButton?.isEnabled = snapshot != nil && !busy
         refreshButton?.isEnabled = snapshot != nil && !busy
         commentsButton?.toolTip = "\(progress.comments.count) comments"

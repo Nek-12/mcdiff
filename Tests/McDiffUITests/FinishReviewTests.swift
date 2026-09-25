@@ -118,7 +118,8 @@ final class FinishReviewTests: XCTestCase {
         controller.start(store: store, arguments: ["--repo", directory.path])
         try await waitFor { controller.screen == .review }
         let toolbar = try XCTUnwrap(window.toolbar)
-        let comments = try XCTUnwrap(toolbar.items.first { $0.label == "Comments" })
+        let actions = try XCTUnwrap(toolbar.items.last as? NSToolbarItemGroup)
+        let comments = try XCTUnwrap(actions.subitems.first { $0.label == "Comments" })
         XCTAssertEqual(comments.badge, .count(0))
         let view = try XCTUnwrap(descendants(try XCTUnwrap(window.contentView)).compactMap { $0 as? DiffViewport }.first)
         XCTAssertTrue(view.expanded.contains(file.path))

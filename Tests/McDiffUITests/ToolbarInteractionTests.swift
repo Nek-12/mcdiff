@@ -39,14 +39,19 @@ final class ToolbarInteractionTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTAssertEqual(controller.screen, .review)
-            let commentItem = try XCTUnwrap(toolbar.items.first { $0.label == "Comments" })
+            let navigation = try XCTUnwrap(toolbar.items.last as? NSToolbarItemGroup)
+            XCTAssertEqual(navigation.subitems.map(\.label), ["Comments", "Next file", "Previous file", "Review & next"])
+            XCTAssertFalse(toolbar.items.contains { $0.label == "Comments" })
+            let commentItem = try XCTUnwrap(navigation.subitems.first)
             XCTAssertEqual(commentItem.badge, .count(count))
             XCTAssertEqual(commentItem.isEnabled, count > 0)
             XCTAssertEqual(commentItem.toolTip, "\(count) comments")
-            let navigation = try XCTUnwrap(toolbar.items.last as? NSToolbarItemGroup)
             XCTAssertEqual(navigation.subitems.last?.label, "Review & next")
+            let markReviewed = try XCTUnwrap(navigation.subitems.last)
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(markReviewed.action), to: markReviewed.target, from: markReviewed))
+            XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed[file.path], file.fingerprint)
             let searchIndex = try XCTUnwrap(toolbar.items.firstIndex { $0 is NSSearchToolbarItem })
-            let commentIndex = try XCTUnwrap(toolbar.items.firstIndex { $0 === commentItem })
+            let commentIndex = try XCTUnwrap(toolbar.items.firstIndex { $0 === navigation })
             XCTAssertLessThan(searchIndex, commentIndex)
             XCTAssertFalse(window.isVisible)
         }
@@ -82,9 +87,9 @@ final class ToolbarInteractionTests: XCTestCase {
         let toolbar = try XCTUnwrap(controller.window?.toolbar)
         for identifier in controller.toolbarAllowedItemIdentifiers(toolbar) {
             guard let item = controller.toolbar(toolbar, itemForItemIdentifier: identifier,
-                                                willBeInsertedIntoToolbar: false), item.action != nil else { continue }
+                                                willBeInsertedIntoToolbar: false) else { continue }
             let actions = (item as? NSToolbarItemGroup)?.subitems ?? [item]
-            for action in actions {
+            for action in actions where action.action != nil {
                 XCTAssertFalse(action.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
                                "Missing tooltip for \(action.label)")
             }
