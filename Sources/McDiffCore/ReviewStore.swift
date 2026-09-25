@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 
 public enum DiffLayout: String, Codable, Sendable {
     case split, unified
@@ -30,6 +31,28 @@ public struct ReviewPreferences: Codable, Sendable {
     }
 }
 
+public struct CompletedReviewMetadata: Codable, Sendable {
+    public let id: UUID
+    public let completedAt: Date
+    public let comparisonIdentity: String
+    public let title: String
+    public let request: ComparisonRequest
+    public let baseRevision: String
+    public let targetRevision: String?
+    public let fileFingerprints: [String: String]
+
+    init(snapshot: ReviewSnapshot) {
+        id = UUID()
+        completedAt = Date()
+        comparisonIdentity = snapshot.identity
+        title = snapshot.title
+        request = snapshot.request
+        baseRevision = snapshot.baseRevision
+        targetRevision = snapshot.targetRevision
+        fileFingerprints = Dictionary(uniqueKeysWithValues: snapshot.files.map { ($0.path, $0.fingerprint) })
+    }
+}
+
 public final class ReviewStore: @unchecked Sendable {
     private let directory: URL
     private let lock = NSLock()
@@ -41,26 +64,63 @@ public final class ReviewStore: @unchecked Sendable {
     }
 
     public func loadProgress(identity: String) throws -> ReviewProgress {
-        try read("review-\(Self.digest(identity)).json", default: ReviewProgress())
+        try lock.withLock { try read(progressName(identity), default: ReviewProgress()) }
     }
     public func saveProgress(_ progress: ReviewProgress, identity: String) throws {
-        try write(progress, name: "review-\(Self.digest(identity)).json")
+        try lock.withLock { try write(progress, name: progressName(identity)) }
     }
     public func loadPreferences() throws -> ReviewPreferences {
-        try read("preferences.json", default: ReviewPreferences())
+        try lock.withLock { try read("preferences.json", default: ReviewPreferences()) }
     }
     public func savePreferences(_ preferences: ReviewPreferences) throws {
-        try write(preferences, name: "preferences.json")
+        try lock.withLock { try write(preferences, name: "preferences.json") }
+    }
+
+    /// Archives saved progress and returns its round directory. A round is complete only
+    /// when progress.json exists; metadata-only directories are uncommitted preparations.
+    public func finishReview(snapshot: ReviewSnapshot) throws -> URL {
+        try lock.withLock {
+            let name = progressName(snapshot.identity)
+            let activeURL = directory.appendingPathComponent(name)
+            let savedData: Data
+            do { savedData = try Data(contentsOf: activeURL) }
+            catch CocoaError.fileReadNoSuchFile { savedData = try JSONEncoder().encode(ReviewProgress()) }
+            // Never archive unreadable progress and silently replace it with an empty review.
+            _ = try JSONDecoder().decode(ReviewProgress.self, from: savedData)
+
+            let metadata = CompletedReviewMetadata(snapshot: snapshot)
+            let archive = directory.appendingPathComponent("completed-reviews", isDirectory: true)
+                .appendingPathComponent(metadata.id.uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+            try JSONEncoder().encode(metadata).write(to: archive.appendingPathComponent("metadata.json"), options: .atomic)
+            if !FileManager.default.fileExists(atPath: activeURL.path) {
+                try savedData.write(to: activeURL, options: .atomic)
+            }
+
+            let completedURL = archive.appendingPathComponent("progress.json")
+            // Both paths share the store volume. Rename is the single atomic commit:
+            // it preserves the exact saved bytes and removes the active round together.
+            guard rename(activeURL.path, completedURL.path) == 0 else {
+                let code = errno
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
+                    NSLocalizedDescriptionKey: "Could not finish the review: \(String(cString: strerror(code))). Saved review progress is unchanged.",
+                    NSFilePathErrorKey: activeURL.path
+                ])
+            }
+            return archive
+        }
+    }
+
+    private func progressName(_ identity: String) -> String {
+        "review-\(Self.digest(identity)).json"
     }
 
     private func read<T: Decodable>(_ name: String, default value: T) throws -> T {
-        lock.lock(); defer { lock.unlock() }
         let url = directory.appendingPathComponent(name)
         do { return try JSONDecoder().decode(T.self, from: Data(contentsOf: url)) }
         catch CocoaError.fileReadNoSuchFile { return value }
     }
     private func write<T: Encodable>(_ value: T, name: String) throws {
-        lock.lock(); defer { lock.unlock() }
         try JSONEncoder().encode(value).write(to: directory.appendingPathComponent(name), options: .atomic)
     }
     static func digest(_ value: String) -> String {

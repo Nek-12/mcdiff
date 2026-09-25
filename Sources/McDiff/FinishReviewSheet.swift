@@ -1,0 +1,126 @@
+import AppKit
+
+final class FinishReviewSheet: NSWindowController {
+    private let text: String
+    private let pasteboard: NSPasteboard
+    private let archive: () async throws -> Void
+    private let onClose: (Bool) -> Void
+    private let status = NSTextField(wrappingLabelWithString: "")
+    private let spinner = NSProgressIndicator()
+    private var buttons: [NSButton] = []
+    private var operation: Task<Void, Never>?
+
+    init(text: String, pasteboard: NSPasteboard = .general,
+         archive: @escaping () async throws -> Void, onClose: @escaping (Bool) -> Void) {
+        self.text = text; self.pasteboard = pasteboard
+        self.archive = archive; self.onClose = onClose
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 240),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "Finish review"
+        let description = NSTextField(wrappingLabelWithString:
+            "Finish & archive preserves this round on disk and returns Home. Opening this comparison again starts a fresh review. Cancel keeps the current review open.")
+        let copy = Style.button("Copy again", icon: "copy", target: self, action: #selector(copyAgain))
+        let export = Style.button("Export…", icon: "square.and.arrow.down", target: self, action: #selector(exportMarkdown))
+        let cancel = Style.button("Cancel", target: self, action: #selector(cancel))
+        cancel.keyEquivalent = "\u{1b}"
+        let finish = Style.button("Finish & archive", target: self, action: #selector(finish))
+        finish.keyEquivalent = "\r"
+        buttons = [copy, export, cancel, finish]
+        spinner.style = .spinning; spinner.controlSize = .small; spinner.isDisplayedWhenStopped = false
+        status.font = .systemFont(ofSize: 12)
+        let feedback = Style.stack([spinner, status], spacing: 8)
+        let actions = Style.stack([copy, export, Style.spacer(), cancel, finish], spacing: 8)
+        let content = Style.stack([
+            Style.label("Finish review", size: 17, weight: .semibold), description,
+            feedback, actions
+        ], orientation: .vertical, spacing: 18)
+        content.alignment = .leading
+        window.contentView = NSView()
+        Style.pin(content, in: window.contentView!, inset: 20)
+        for view in [description, feedback, actions] {
+            view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        }
+        copyAgain()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc func copyAgain() {
+        guard operation == nil else { return }
+        pasteboard.clearContents()
+        if pasteboard.setString(text, forType: .string) {
+            showStatus("Review copied to clipboard.")
+        } else {
+            showStatus("Could not copy the review. Try Copy again or Export.", failed: true)
+        }
+    }
+
+    @objc private func exportMarkdown() {
+        guard operation == nil, let window else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "review.md"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.export(to: url)
+        }
+    }
+
+    func export(to url: URL) {
+        guard operation == nil else { return }
+        setWorking("Exporting review…")
+        operation = Task { [weak self, text] in
+            do {
+                try await Task.detached { try text.write(to: url, atomically: true, encoding: .utf8) }.value
+                self?.showStatus("Exported \(url.lastPathComponent).")
+            } catch {
+                self?.showStatus("Could not export: \(error.localizedDescription) Try Export again.", failed: true)
+            }
+            self?.setWorking(nil)
+        }
+    }
+
+    @objc func finish() {
+        guard operation == nil else { return }
+        setWorking("Archiving review…")
+        operation = Task { [weak self, archive] in
+            do {
+                try await archive()
+                self?.setWorking(nil)
+                self?.dismiss(completed: true)
+            } catch {
+                self?.showStatus("Could not archive: \(error.localizedDescription) Your active review is unchanged. Try again.", failed: true)
+                self?.setWorking(nil)
+            }
+        }
+    }
+
+    @objc func cancel() {
+        guard operation == nil else { return }
+        dismiss(completed: false)
+    }
+
+    private func dismiss(completed: Bool) {
+        if let window {
+            window.sheetParent?.endSheet(window)
+            window.orderOut(nil)
+        }
+        onClose(completed)
+    }
+    private func setWorking(_ message: String?) {
+        for button in buttons { button.isEnabled = message == nil }
+        if let message {
+            spinner.startAnimation(nil)
+            showStatus(message)
+        } else {
+            spinner.stopAnimation(nil)
+            operation = nil
+        }
+    }
+    private func showStatus(_ message: String, failed: Bool = false) {
+        status.stringValue = message
+        status.toolTip = message
+        status.textColor = failed ? .systemRed : .secondaryLabelColor
+    }
+}

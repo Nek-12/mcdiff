@@ -177,6 +177,7 @@ final class UnifiedViewportTests: XCTestCase {
         defer { window.orderOut(nil) }
         view.markdownContent = [file.path: MarkdownFileContent(old: String(repeating: "Removed **needle**\n\n", count: 100),
                                                              new: "# New visible needle")]
+        view.toggleMarkdown(for: 0)
         try await ready(view, markdown: file)
         let unified = try XCTUnwrap(view.markdownLayout(for: file))
         XCTAssertEqual(unified.old.storage.length, 0)

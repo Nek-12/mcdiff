@@ -131,6 +131,25 @@ final class SearchTests: XCTestCase {
     }
 
     @MainActor
+    func testMarkdownStartsWithSearchableSourceAndReindexesWhenRenderingChanges() async throws {
+        _ = NSApplication.shared
+        let view = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
+        let files = fixture()
+        view.markdownContent = ["docs/guide.md": MarkdownFileContent(old: nil, new: "# Rendered content")]
+        view.setFiles(files, presentations: presentations(files))
+        view.search(query: "hunk only")
+        try await ready(view)
+        XCTAssertFalse(view.rendersMarkdown(files[1]))
+        XCTAssertEqual(view.currentSearchMatch?.target, .code(file: 1, side: .new, line: 1, importBlock: nil))
+        view.toggleMarkdown(for: 1)
+        try await ready(view)
+        XCTAssertNil(view.currentSearchMatch)
+        view.toggleMarkdown(for: 1)
+        try await ready(view)
+        XCTAssertEqual(view.currentSearchMatch?.target, .code(file: 1, side: .new, line: 1, importBlock: nil))
+    }
+
+    @MainActor
     func testRenderedHitDeepInFullBlobIsMeasuredRevealedAndPaintedWithoutChangingMode() async throws {
         _ = NSApplication.shared
         let view = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
@@ -141,6 +160,7 @@ final class SearchTests: XCTestCase {
         view.markdownContent = ["docs/guide.md": MarkdownFileContent(old: "",
             new: String(repeating: "Earlier paragraph.\n\n", count: 100) + "Deep **needle** target.")]
         view.setFiles(files, presentations: presentations(files))
+        view.toggleMarkdown(for: 1)
         view.search(query: "deep needle")
         try await ready(view)
         let match = try XCTUnwrap(view.currentSearchMatch)

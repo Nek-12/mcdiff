@@ -36,7 +36,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var finishButton: NSToolbarItem!
     private var refreshButton: NSToolbarItem!
     private var commentsButton: NSToolbarItem!
-    private var feedbackActions: NSToolbarItemGroup!
+    private var finishSheet: FinishReviewSheet?
     private var wrapButton: NSToolbarItemGroup!
     private var layoutButton: NSToolbarItem!
     private let splitController = NSSplitViewController()
@@ -45,7 +45,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         .init("home"), .init("refresh"), .init("sidebarDivider"),
         .init("search"), .space, .init("status"), .flexibleSpace,
         .init("wrap"), .space, .init("split"),
-        .space, .init("comments"), .init("feedback"), .space, .init("navigation")
+        .space, .init("finish"), .space, .init("comments"), .init("navigation")
     ]
     private let emptyToolbarOrder: [NSToolbarItem.Identifier] = [
         .init("welcomeSources"), .init("homeRefresh"), .init("status"), .flexibleSpace,
@@ -56,9 +56,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private let noiseFilter = AnimatedCheckbox(checkboxWithTitle: "Generated / noise", target: nil, action: nil)
     private enum Activity { case comparison, layout, search, account }
     private var activities: Set<Activity> = []
-    private var busy: Bool { activities.contains(.comparison) }
+    private var busy: Bool { activities.contains(.comparison) || finishSheet != nil }
     private var statusDismissal: DispatchWorkItem?
-    private var copyConfirmation: DispatchWorkItem?
 
     init(github: GitHubClient = GitHubClient(clientID: Bundle.main.object(forInfoDictionaryKey: "GitHubOAuthClientID") as? String ?? "")) {
         self.github = github
@@ -83,7 +82,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { settleDraft() }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { finishSheet == nil && settleDraft() }
 
     func start(store suppliedStore: ReviewStore? = nil, arguments: [String] = ProcessInfo.processInfo.arguments) {
         bootstrapAccount()
@@ -191,16 +190,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         updateLayoutButton()
         commentsButton = item("comments", "Comments", "message-square", #selector(showComments(_:)))
         commentsButton.visibilityPriority = .high
-        feedbackActions = NSToolbarItemGroup(itemIdentifier: .init("feedback"),
-            images: [toolbarIcon("copy")!, toolbarIcon("square.and.arrow.down")!],
-            selectionMode: .momentary, labels: ["Copy review", "Export Markdown"],
-            target: self, action: #selector(feedbackAction(_:)))
-        feedbackActions.isBordered = true
-        feedbackActions.autovalidates = false
-        feedbackActions.visibilityPriority = .high
-        finishButton = feedbackActions.subitems[0]
-        toolbarItems[feedbackActions.itemIdentifier] = feedbackActions
-        for group in [welcomeSources, navigation, wrapButton!, feedbackActions!] {
+        finishButton = item("finish", "Finish review", "check-check", #selector(finishReview), text: true)
+        finishButton.visibilityPriority = .high
+        for group in [welcomeSources, navigation, wrapButton!] {
             for subitem in group.subitems { subitem.toolTip = subitem.label }
         }
         welcomeSources.subitems[0].toolTip = "Open comparison (⌘O)"
@@ -268,13 +260,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         default: break
         }
     }
-    @objc private func feedbackAction(_ sender: NSToolbarItemGroup) {
-        switch sender.selectedIndex {
-        case 0: finishReview()
-        case 1: exportReview()
-        default: break
-        }
-    }
     private func installReviewMenu() {
         let menu = NSMenu(title: "Review")
         let entries: [(String, Selector, String)] = [
@@ -283,8 +268,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             ("Find in review", #selector(findInReview), "f"),
             ("Review & next", #selector(markAndNext), "j"),
             ("Comment on selection", #selector(commentOnSelection), "l"),
-            ("Copy review", #selector(finishReview), "\r"),
-            ("Export Markdown…", #selector(exportReview), "")
+            ("Finish review…", #selector(finishReview), "\r")
         ]
         for (title, action, key) in entries {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
@@ -533,7 +517,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let hasFile = files.indices.contains(focused)
         reviewNext?.isEnabled = hasFile && !busy
         finishButton?.isEnabled = snapshot != nil && !busy
-        feedbackActions?.subitems[1].isEnabled = snapshot != nil && !busy
         refreshButton?.isEnabled = snapshot != nil && !busy
         commentsButton?.toolTip = "\(progress.comments.count) comments"
         commentsButton?.badge = .count(progress.comments.count)
@@ -556,7 +539,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         finishButton?.toolTip = message
         let dismissal = DispatchWorkItem { [weak self] in
             if self?.busy == false {
-                self?.finishButton?.toolTip = "Copy review"
+                self?.finishButton?.toolTip = "Finish review"
             }
         }
         statusDismissal = dismissal
@@ -733,42 +716,47 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if let index = files.firstIndex(where: { $0.path == comment.path }) { diff.navigate(to: index) }
         presentComment(comment, isNew: false)
     }
-    @objc private func finishReview() {
-        guard screen == .review, !busy, let snapshot, settleDraft() else { return }
-        copyConfirmation?.cancel()
-        finishButton.image = Icons.toolbarImage("copy")
+    @objc func finishReview() {
+        guard let sheet = prepareFinishReview(), let window else { return }
+        window.beginSheet(sheet.window!)
+    }
+    func prepareFinishReview(pasteboard: NSPasteboard = .general) -> FinishReviewSheet? {
+        guard screen == .review, !busy, let snapshot, let store, let window,
+              window.attachedSheet == nil, settleDraft() else { return nil }
         let text = ReviewExport.markdown(snapshot: snapshot, progress: progress)
-        NSPasteboard.general.clearContents()
-        if NSPasteboard.general.setString(text, forType: .string) {
-            showStatus("Copied \(progress.comments.count) comments")
-            confirmCopy()
-        } else { showError(GitError("The clipboard could not be updated. Try again or export a Markdown file."), title: "Could not copy review") }
-    }
-    private func confirmCopy() {
-        copyConfirmation?.cancel()
-        finishButton.image = Icons.toolbarImage("check")
-        finishButton.toolTip = "Review copied"
-        let dismissal = DispatchWorkItem { [weak self] in
+        let sheet = FinishReviewSheet(text: text, pasteboard: pasteboard, archive: {
+            _ = try await Task.detached { try store.finishReview(snapshot: snapshot) }.value
+        }, onClose: { [weak self] completed in
             guard let self else { return }
-            self.finishButton.image = Icons.toolbarImage("copy")
-            self.finishButton.toolTip = "Copy review"
-        }
-        copyConfirmation = dismissal
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: dismissal)
+            self.finishSheet = nil
+            if completed { self.clearCompletedReview() }
+            self.updateActions()
+        })
+        finishSheet = sheet
+        updateActions()
+        return sheet
     }
-    @objc private func exportReview() {
-        guard screen == .review, !busy, let window, let snapshot, settleDraft() else { return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "review.md"
-        panel.allowedContentTypes = [.plainText]
-        panel.canCreateDirectories = true
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            do {
-                try ReviewExport.markdown(snapshot: snapshot, progress: self.progress).write(to: url, atomically: true, encoding: .utf8)
-                self.showStatus("Exported \(url.lastPathComponent)")
-            } catch { self.showError(error, title: "Could not export review") }
-        }
+    private func clearCompletedReview() {
+        snapshot = nil
+        progress = ReviewProgress()
+        commentEditor = nil
+        files = []
+        focused = 0
+        search.stringValue = ""
+        searchMatchingFiles = nil
+        diff.expanded = []
+        diff.markdownContent = [:]
+        diff.setComments([])
+        diff.setFiles([], presentations: [:])
+        diff.contexts.load = nil
+        diff.contexts.resolve = nil
+        diff.search(query: "")
+        home.resumeTitle = nil
+        screen = .home
+        rebuildSidebar()
+        updateComparisonPresentation()
+        window?.title = "McDiff"
+        window?.makeFirstResponder(home.table)
     }
     @objc private func showRecent(_ sender: Any?) {
         let menu = NSMenu()

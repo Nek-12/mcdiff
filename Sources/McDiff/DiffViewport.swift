@@ -83,17 +83,17 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             if !searchQuery.isEmpty { search(query: searchQuery) }
         }
     }
-    private var markdownSourcePaths: Set<String> = []
+    private var renderedMarkdownPaths: Set<String> = []
 
     func rendersMarkdown(_ file: FileDiff) -> Bool {
-        !file.isBinary && RenderedMarkdown.accepts(file.path) && !markdownSourcePaths.contains(file.path)
+        !file.isBinary && RenderedMarkdown.accepts(file.path) && renderedMarkdownPaths.contains(file.path)
     }
 
     func toggleMarkdown(for index: Int) {
         guard files.indices.contains(index), !files[index].isBinary, RenderedMarkdown.accepts(files[index].path) else { return }
         let path = files[index].path
-        if markdownSourcePaths.contains(path) { markdownSourcePaths.remove(path) }
-        else { markdownSourcePaths.insert(path) }
+        if renderedMarkdownPaths.contains(path) { renderedMarkdownPaths.remove(path) }
+        else { renderedMarkdownPaths.insert(path) }
         if selection?.file == index { selection = nil }
         markdownTask?.cancel(); markdownTask = nil
         visibleMarkdown.removeAll()
@@ -336,7 +336,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             let maximum = file.hunks.lazy.flatMap(\.lines).reduce(1) { max($0, $1.oldNumber ?? 0, $1.newNumber ?? 0) }
             return SourceGutter.numberWidth(for: maximum)
         }
-        markdownSourcePaths.removeAll()
+        renderedMarkdownPaths.removeAll()
         highlights.removeAllObjects(); failedHighlights.removeAll()
         markdownTask?.cancel(); markdownTask = nil
         markdownLayouts.removeAllObjects(); markdownHeights.removeAll()
@@ -362,7 +362,8 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
         isSearchPending = true
         onSearchBusy?(true)
-        let files = files, presentations = presentations, markdown = markdownContent, sourcePaths = markdownSourcePaths, layout = diffLayout
+        let files = files, presentations = presentations, markdown = markdownContent, layout = diffLayout
+        let sourcePaths = Set(files.filter { !rendersMarkdown($0) }.map(\.path))
         let context = contexts.expandedPairs
         searchTask = Task { [weak self, searchEngine] in
             do {
@@ -1318,14 +1319,16 @@ final class DiffCell: NSView {
         if markdownButton == nil {
             let button = NSButton(title: "", target: self, action: #selector(toggleMarkdown))
             button.bezelStyle = .glass
+            button.setButtonType(.pushOnPushOff)
             button.controlSize = .regular
             button.imagePosition = .imageOnly
+            button.image = Icons.image("file-text")
+            button.toolTip = "Render Markdown for this file"
             addSubview(button)
             markdownButton = button
         }
         markdownButton?.isHidden = false
-        markdownButton?.image = Icons.image(owner.rendersMarkdown(file) ? "file-code" : "file-text")
-        markdownButton?.toolTip = owner.rendersMarkdown(file) ? "Show Markdown source for this file" : "Render Markdown for this file"
+        markdownButton?.state = owner.rendersMarkdown(file) ? .on : .off
         markdownButton?.sizeToFit()
         needsLayout = true
     }

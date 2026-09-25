@@ -133,7 +133,7 @@ final class ReviewCheckboxTests: XCTestCase {
         XCTAssertFalse(check.isEnabled)
         XCTAssertLessThan(markdown.frame.maxX, check.frame.minX)
         markdown.performClick(nil)
-        XCTAssertFalse(view.rendersMarkdown(file))
+        XCTAssertTrue(view.rendersMarkdown(file))
         XCTAssertTrue(view.expanded.contains(file.path))
         cell.rowIndex = 1
         cell.updateHeaderButton()

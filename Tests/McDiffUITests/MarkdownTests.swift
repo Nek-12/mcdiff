@@ -91,6 +91,8 @@ final class MarkdownTests: XCTestCase {
         view.expanded = [markdown.path, next.path]
         view.setFiles([markdown, next], presentations: [markdown.path: DiffPresentation.rows(for: markdown),
                                                         next.path: DiffPresentation.rows(for: next)])
+        XCTAssertFalse(view.rendersMarkdown(markdown))
+        view.toggleMarkdown(for: 0)
         XCTAssertTrue(view.rendersMarkdown(markdown))
         try await ready(view, file: markdown)
         let layout = try XCTUnwrap(view.markdownLayout(for: markdown))
@@ -134,7 +136,7 @@ final class MarkdownTests: XCTestCase {
         })
         view.expanded = Set(files.map(\.path))
         view.setFiles(files, presentations: presentations)
-        try await ready(view, file: files[0])
+        try await ready(view)
 
         func button(for index: Int) throws -> NSButton {
             let row = try XCTUnwrap(view.headerRows[index])
@@ -147,36 +149,41 @@ final class MarkdownTests: XCTestCase {
             return button
         }
 
-        XCTAssertTrue(view.rendersMarkdown(files[0]))
-        XCTAssertTrue(view.rendersMarkdown(files[1]))
-        XCTAssertEqual(try button(for: 0).toolTip, "Show Markdown source for this file")
+        XCTAssertFalse(view.rendersMarkdown(files[0]))
+        XCTAssertFalse(view.rendersMarkdown(files[1]))
+        XCTAssertEqual(try button(for: 0).state, .off)
+        XCTAssertEqual(try button(for: 0).toolTip, "Render Markdown for this file")
         XCTAssertEqual(try button(for: 0).title, "")
         XCTAssertEqual(try button(for: 0).image?.size, NSSize(width: 16, height: 16))
+        let renderIcon = try XCTUnwrap(button(for: 0).image)
         let buttonSize = try button(for: 0).frame.size
         try button(for: 0).performClick(nil)
-        try await ready(view)
-        XCTAssertFalse(view.rendersMarkdown(files[0]))
-        XCTAssertTrue(view.rendersMarkdown(files[1]))
+        try await ready(view, file: files[0])
+        XCTAssertTrue(view.rendersMarkdown(files[0]))
+        XCTAssertFalse(view.rendersMarkdown(files[1]))
+        XCTAssertEqual(try button(for: 0).state, .on)
+        XCTAssertEqual(try button(for: 0).image?.tiffRepresentation, renderIcon.tiffRepresentation)
         XCTAssertTrue(view.expanded.contains(files[0].path))
         XCTAssertEqual(try button(for: 0).toolTip, "Render Markdown for this file")
         XCTAssertEqual(try button(for: 0).frame.size, buttonSize)
         view.rebuild(keeping: 0)
         try await ready(view)
-        XCTAssertFalse(view.rendersMarkdown(files[0]))
+        XCTAssertTrue(view.rendersMarkdown(files[0]))
         for width: CGFloat in [700, 1200, 850] {
             view.setFrameSize(NSSize(width: width, height: 700))
             view.layoutSubtreeIfNeeded()
             _ = try button(for: 0)
         }
         try button(for: 0).performClick(nil)
-        try await ready(view, file: files[0])
-        XCTAssertTrue(view.rendersMarkdown(files[0]))
+        try await ready(view)
+        XCTAssertFalse(view.rendersMarkdown(files[0]))
+        XCTAssertEqual(try button(for: 0).state, .off)
         XCTAssertTrue(view.expanded.contains(files[0].path))
         view.toggleMarkdown(for: 0)
         view.setFiles(files, presentations: presentations)
-        try await ready(view, file: files[0])
-        XCTAssertTrue(view.rendersMarkdown(files[0]))
-        XCTAssertTrue(view.rendersMarkdown(files[1]))
+        try await ready(view)
+        XCTAssertFalse(view.rendersMarkdown(files[0]))
+        XCTAssertFalse(view.rendersMarkdown(files[1]))
         let codeHeader = try XCTUnwrap(view.table.view(atColumn: 0, row: try XCTUnwrap(view.headerRows[2]), makeIfNecessary: true))
         XCTAssertTrue(codeHeader.subviews.compactMap { $0 as? NSButton }
             .filter { !($0 is AnimatedCheckbox) }.allSatisfy(\.isHidden))
@@ -199,6 +206,7 @@ final class MarkdownTests: XCTestCase {
         view.setFiles(files, presentations: Dictionary(uniqueKeysWithValues: files.map { ($0.path, DiffPresentation.rows(for: $0)) }))
         try await ready(view)
         view.navigate(to: 1)
+        view.toggleMarkdown(for: 1)
         try await ready(view, file: files[1])
 
         func headerY() throws -> CGFloat {
@@ -245,6 +253,7 @@ final class MarkdownTests: XCTestCase {
         view.setFiles(files, presentations: Dictionary(uniqueKeysWithValues: files.map { ($0.path, DiffPresentation.rows(for: $0)) }))
         try await ready(view)
         view.navigate(to: 1)
+        view.toggleMarkdown(for: 1)
         try await ready(view, file: files[1])
         for rendered in [true, false] {
             if !rendered { view.toggleMarkdown(for: 1); try await ready(view) }
@@ -275,6 +284,7 @@ final class MarkdownTests: XCTestCase {
         view.markdownContent = ["README.md": MarkdownFileContent(old: "# Old", new: String(repeating: "Paragraph.\n\n", count: 100))]
         view.expanded = ["main.swift"]
         view.setFiles(files, presentations: Dictionary(uniqueKeysWithValues: files.map { ($0.path, DiffPresentation.rows(for: $0)) }))
+        view.toggleMarkdown(for: 1)
         try await ready(view)
         for _ in 0..<3 {
             for index in [1, 2] {
@@ -303,6 +313,7 @@ final class MarkdownTests: XCTestCase {
         let markdown = file("README.md")
         view.expanded = [markdown.path]
         view.setFiles([markdown], presentations: [markdown.path: DiffPresentation.rows(for: markdown)])
+        view.toggleMarkdown(for: 0)
         try await ready(view)
         XCTAssertNil(view.markdownLayout(for: markdown))
         view.markdownContent = [markdown.path: MarkdownFileContent(old: nil, new: nil, error: "Git failed")]

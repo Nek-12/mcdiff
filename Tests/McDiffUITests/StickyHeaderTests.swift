@@ -87,6 +87,7 @@ final class StickyHeaderTests: XCTestCase {
         }
         view.expanded = [file.path]
         view.setFiles([file], presentations: [file.path: DiffPresentation.rows(for: file)])
+        view.toggleMarkdown(for: 0)
         for _ in 0..<400 {
             if view.markdownLayout(for: file) != nil { break }
             try await Task.sleep(for: .milliseconds(10))
@@ -98,9 +99,20 @@ final class StickyHeaderTests: XCTestCase {
         view.pinnedHeader.cell.layoutSubtreeIfNeeded()
         let markdown = try XCTUnwrap(view.pinnedHeader.cell.subviews.compactMap { $0 as? NSButton }
             .first { !($0 is AnimatedCheckbox) })
+        XCTAssertEqual(markdown.state, .on)
         markdown.performClick(nil)
         try await ready(view)
         XCTAssertFalse(view.rendersMarkdown(file))
+        XCTAssertEqual(markdown.state, .off)
+        let inline = try XCTUnwrap(view.table.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        let inlineRender = try XCTUnwrap(inline.subviews.compactMap { $0 as? NSButton }
+            .first { !($0 is AnimatedCheckbox) })
+        XCTAssertEqual(inlineRender.state, .off)
+        inlineRender.performClick(nil)
+        try await ready(view)
+        XCTAssertTrue(view.rendersMarkdown(file))
+        XCTAssertEqual(markdown.state, .on)
+        XCTAssertEqual(inlineRender.state, .on)
         XCTAssertTrue(view.expanded.contains(file.path))
         XCTAssertEqual(view.scroll.documentVisibleRect.minY, 0, accuracy: 1)
         for state in [true, false] {
