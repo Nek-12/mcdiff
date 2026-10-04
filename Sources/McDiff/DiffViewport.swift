@@ -1327,7 +1327,7 @@ final class DiffCell: NSView {
             button.setButtonType(.pushOnPushOff)
             button.controlSize = .regular
             button.imagePosition = .imageOnly
-            button.image = Icons.image("file-text")
+            button.image = Icons.image(.document)
             button.toolTip = "Render Markdown for this file"
             addSubview(button)
             markdownButton = button
@@ -1370,7 +1370,7 @@ final class DiffCell: NSView {
             NSColor.separatorColor.withAlphaComponent(0.30).setFill()
             NSRect(x: 0, y: 0, width: max(0, width - 12), height: 0.5).fill()
             let isOpen = owner.expanded.contains(file.path)
-            Icons.draw(isOpen ? "chevron-down" : "chevron-right", in: NSRect(x: 2, y: 12, width: 14, height: 14))
+            Icons.draw(isOpen ? .chevronDown : .chevronRight, in: NSRect(x: 2, y: 12, width: 14, height: 14))
             let title = file.headerTitle
             let titleFont = NSFont.systemFont(ofSize: 12, weight: .medium)
             let countFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
@@ -1399,19 +1399,19 @@ final class DiffCell: NSView {
             NSColor.separatorColor.withAlphaComponent(0.08).setFill()
             NSBezierPath(roundedRect: NSRect(x: 0, y: 2, width: max(0, width - 12), height: bounds.height - 4), xRadius: 5, yRadius: 5).fill()
             let open = owner.importsExpanded(path: file.path, block: block)
-            Icons.draw(open ? "chevron-down" : "chevron-right", in: NSRect(x: 7, y: 8, width: 12, height: 12))
+            Icons.draw(open ? .chevronDown : .chevronRight, in: NSRect(x: 7, y: 8, width: 12, height: 12))
             let changed = pairs.filter { $0.old?.kind == .deletion || $0.new?.kind == .addition }.count
             draw("Imports · \(pairs.count) lines\(changed > 0 ? " · \(changed) changed" : "")",
                  at: NSPoint(x: 28, y: 8), font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
         case .context(let section):
             let state = owner.contexts.state(path: file.path, section: section.id)
-            let icon: String
-            if case .failed = owner.contexts.preparation(path: file.path) { icon = "rotate-cw" }
+            let icon: Icons.Symbol
+            if case .failed = owner.contexts.preparation(path: file.path) { icon = .refresh }
             else {
                 switch state {
-                case .expanded: icon = "chevron-down"
-                case .failed: icon = "rotate-cw"
-                default: icon = "chevron-right"
+                case .expanded: icon = .chevronDown
+                case .failed: icon = .refresh
+                default: icon = .chevronRight
                 }
             }
             if case .empty = state {} else {
@@ -1540,7 +1540,7 @@ final class DiffCell: NSView {
            let marker = owner.commentMarkerRect(file: fileIndex, side: side) {
             let marker = marker.offsetBy(dx: rect.minX, dy: 0)
             if number == range.lowerBound {
-                Icons.draw("message-square", in: marker, color: .labelColor)
+                Icons.draw(.comment, in: marker, color: .labelColor)
             }
             if range.lowerBound != range.upperBound {
                 let start: CGFloat = number == range.lowerBound ? 19 : 0

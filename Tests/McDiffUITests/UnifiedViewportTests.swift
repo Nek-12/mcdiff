@@ -306,8 +306,13 @@ final class UnifiedViewportTests: XCTestCase {
         }
         let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
         let scale = CGFloat(bitmap.pixelsWide) / 48
-        for x: CGFloat in [5, 29] {
-            XCTAssertGreaterThan(try XCTUnwrap(bitmap.colorAt(x: Int(x * scale), y: Int(8 * scale))).alphaComponent, 0)
+        for rail in [0, 24] {
+            let hasMarker = (rail..<(rail + 24)).contains { x in
+                (0..<18).contains { y in
+                    (bitmap.colorAt(x: Int(CGFloat(x) * scale), y: Int(CGFloat(y) * scale))?.alphaComponent ?? 0) > 0
+                }
+            }
+            XCTAssertTrue(hasMarker, "Each original side must retain its comment marker")
         }
     }
 

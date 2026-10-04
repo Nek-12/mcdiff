@@ -42,7 +42,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private let splitController = NSSplitViewController()
     private var toolbarItems: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     private let toolbarOrder: [NSToolbarItem.Identifier] = [
-        .init("home"), .init("refresh"), .init("sidebarDivider"),
+        .flexibleSpace, .init("home"), .init("refresh"), .init("sidebarDivider"),
         .init("search"), .space, .init("status"), .flexibleSpace,
         .init("wrap"), .space, .init("split"),
         .space, .init("navigation"), .space, .init("finish")
@@ -145,12 +145,11 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         window.contentViewController = backdrop
         splitController.splitView.setPosition(290, ofDividerAt: 0)
 
-        let toolbarIcon = Icons.toolbarImage
-        func item(_ id: String, _ title: String, _ icon: String, _ action: Selector?, text: Bool = false) -> NSToolbarItem {
+        func item(_ id: String, _ title: String, _ icon: Icons.Symbol, _ action: Selector?, text: Bool = false) -> NSToolbarItem {
             let identifier = NSToolbarItem.Identifier(id)
             let item = NSToolbarItem(itemIdentifier: identifier)
             item.label = title; item.paletteLabel = title; item.toolTip = title
-            item.image = toolbarIcon(icon)
+            item.image = Icons.image(icon)
             if text { item.title = title }
             item.isBordered = true
             item.target = self; item.action = action
@@ -158,14 +157,14 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             toolbarItems[identifier] = item
             return item
         }
-        _ = item("home", "Home", "house", #selector(showHome))
-        _ = item("homeRefresh", "Refresh pull requests", "rotate-cw", #selector(refresh))
-        _ = item("account", "Sign in to GitHub", "person.crop.circle", #selector(accountAction))
+        _ = item("home", "Home", .home, #selector(showHome))
+        _ = item("homeRefresh", "Refresh pull requests", .refresh, #selector(refresh))
+        _ = item("account", "Sign in to GitHub", .account, #selector(accountAction))
         toolbarItems[home.searchItem.itemIdentifier] = home.searchItem
-        refreshButton = item("refresh", "Refresh", "rotate-cw", #selector(refresh))
+        refreshButton = item("refresh", "Refresh", .refresh, #selector(refresh))
         refreshButton.toolTip = "Refresh comparison (⌘R)"
         let welcomeSources = NSToolbarItemGroup(itemIdentifier: .init("welcomeSources"),
-            images: [toolbarIcon("folder-open")!, toolbarIcon("clock.arrow.circlepath")!],
+            images: [Icons.image(.folder), Icons.image(.recents)],
             selectionMode: .momentary, labels: ["Open comparison", "Recent comparisons"],
             target: self, action: #selector(welcomeSourceAction(_:)))
         welcomeSources.isBordered = true
@@ -174,23 +173,23 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let divider = NSTrackingSeparatorToolbarItem(identifier: .init("sidebarDivider"), splitView: splitController.splitView, dividerIndex: 0)
         toolbarItems[divider.itemIdentifier] = divider
         let navigation = NSToolbarItemGroup(itemIdentifier: .init("navigation"))
-        commentsButton = item("comments", "Comments", "message-square", #selector(showComments(_:)))
+        commentsButton = item("comments", "Comments", .comment, #selector(showComments(_:)))
         navigation.subitems = [
             commentsButton,
-            item("next", "Next file", "arrow-down", #selector(nextFile)),
-            item("previous", "Previous file", "arrow-up", #selector(previousFile)),
-            item("reviewNext", "Review & next", "check", #selector(markAndNext))
+            item("next", "Next file", .next, #selector(nextFile)),
+            item("previous", "Previous file", .previous, #selector(previousFile)),
+            item("reviewNext", "Review & next", .review, #selector(markAndNext))
         ]
         reviewActions = navigation
         reviewActions.visibilityPriority = .high
         navigation.isBordered = true
         navigation.autovalidates = false
         toolbarItems[navigation.itemIdentifier] = navigation
-        wrapButton = item("wrap", "Wrap off", "arrow.turn.down.left", #selector(wrapChanged), text: true)
+        wrapButton = item("wrap", "Wrap off", .wrap, #selector(wrapChanged), text: true)
         updateWrapButton()
-        layoutButton = item("split", "Unified", "rectangle", #selector(layoutChanged), text: true)
+        layoutButton = item("split", "Unified", .unified, #selector(layoutChanged), text: true)
         updateLayoutButton()
-        finishButton = item("finish", "Finish review", "check-check", #selector(finishReview), text: true)
+        finishButton = item("finish", "Finish review", .finish, #selector(finishReview), text: true)
         finishButton.style = .prominent
         finishButton.visibilityPriority = .high
         for group in [welcomeSources, navigation] {
@@ -211,6 +210,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         search.delegate = self
         search.sendsSearchStringImmediately = true
         searchItem.searchField = search
+        Icons.configureSearchField(search)
         searchItem.preferredWidthForSearchField = 380
         searchItem.label = "Search review"
         searchItem.toolTip = "Search paths and displayed text (⌘F)"
@@ -596,9 +596,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         wrapButton?.label = title
         wrapButton?.paletteLabel = title
         wrapButton?.toolTip = preferences.softWrap ? "Turn soft wrapping off" : "Turn soft wrapping on"
-        let image = Icons.toolbarImage("arrow.turn.down.left")
+        let image = Icons.image(.wrap)
         wrapButton?.image = preferences.softWrap
-            ? image?.withSymbolConfiguration(.init(paletteColors: [.controlAccentColor])) : image
+            ? image.withSymbolConfiguration(.init(paletteColors: [.controlAccentColor])) : image
     }
     @objc private func layoutChanged() {
         guard !busy, settleDraft() else { return }
@@ -619,7 +619,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         layoutButton?.label = title
         layoutButton?.paletteLabel = title
         layoutButton?.toolTip = "Switch to \(title.lowercased()) diff"
-        layoutButton?.image = Icons.toolbarImage(preferences.diffLayout == .split ? "rectangle" : "rectangle.split.2x1")
+        layoutButton?.image = Icons.image(preferences.diffLayout == .split ? .unified : .split)
     }
     private func savePreferences() throws { try store?.savePreferences(preferences) }
     private func saveProgress() throws {
@@ -872,7 +872,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         account = value
         avatarTask?.cancel()
         let item = toolbarItems[.init("account")]
-        item?.image = Icons.toolbarImage("person.crop.circle")
+        item?.image = Icons.image(.account)
         setActivity(.account, active: false)
         item?.isEnabled = true
         switch value {
@@ -911,7 +911,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 try Task.checkCancellation()
                 guard let response = response as? HTTPURLResponse, response.statusCode == 200,
                       let image = NSImage(data: data) else { throw GitHubError.invalidResponse }
-                let size = NSSize(width: 20, height: 20)
+                let size = NSSize(width: Icons.toolbarPointSize, height: Icons.toolbarPointSize)
                 let circular = NSImage(size: size, flipped: false) { rect in
                     NSBezierPath(ovalIn: rect).addClip()
                     image.draw(in: rect)

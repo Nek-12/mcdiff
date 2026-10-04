@@ -19,8 +19,8 @@ final class FinishReviewSheet: NSWindowController {
                               styleMask: [.titled], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Finish review?"
-        let copy = Style.button("Copy again", icon: "copy", target: self, action: #selector(copyAgain))
-        let export = Style.button("Export…", icon: "square.and.arrow.down", target: self, action: #selector(exportMarkdown))
+        let copy = Style.button("Copy again", icon: .copy, target: self, action: #selector(copyAgain))
+        let export = Style.button("Export…", icon: .export, target: self, action: #selector(exportMarkdown))
         let reset = Style.button("Reset", target: self, action: #selector(reset))
         reset.toolTip = "Archive this round and start fresh in the same comparison"
         let cancel = Style.button("Cancel", target: self, action: #selector(cancel))

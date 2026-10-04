@@ -40,6 +40,7 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         searchItem.searchField.placeholderString = "Search my pull requests"
         searchItem.searchField.delegate = self
         searchItem.searchField.sendsSearchStringImmediately = true
+        Icons.configureSearchField(searchItem.searchField)
         searchItem.toolTip = "Search your open pull requests on GitHub. GitHub returns up to 1,000 results per search."
     }
 
@@ -264,11 +265,11 @@ private final class PRSummaryCell: NSTableCellView {
     var onOpenGitHub: (() -> Void)?
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        let icon = NSImageView(image: Icons.image("git-pull-request") ?? NSImage())
+        let icon = NSImageView(image: Icons.image(.pullRequest))
         icon.contentTintColor = .secondaryLabelColor
         icon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(icon)
-        link.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
+        link.image = Icons.image(.link)
         link.title = ""
         link.bezelStyle = .glass
         link.toolTip = "Open on GitHub"

@@ -117,8 +117,13 @@ final class CommentMarkerTests: XCTestCase {
             let scale = CGFloat(bitmap.pixelsWide) / 24
             return try XCTUnwrap(bitmap.colorAt(x: Int(x * scale), y: Int(y * scale))).alphaComponent
         }
-        XCTAssertGreaterThan(try alpha(first, x: 5, y: 8), 0, "The first line has the bubble")
-        XCTAssertEqual(try alpha(middle, x: 5, y: 8), 0, "Continuation lines must not repeat the bubble")
+        func bubbleInk(_ bitmap: NSBitmapImageRep) throws -> CGFloat {
+            try (0..<10).flatMap { x in
+                try (0..<18).map { y in try alpha(bitmap, x: CGFloat(x), y: CGFloat(y)) }
+            }.max() ?? 0
+        }
+        XCTAssertGreaterThan(try bubbleInk(first), 0, "The first line has the bubble")
+        XCTAssertEqual(try bubbleInk(middle), 0, "Continuation lines must not repeat the bubble")
         let middleHeight = CGFloat(middle.pixelsHigh) / (CGFloat(middle.pixelsWide) / 24)
         XCTAssertGreaterThan(middleHeight, Style.rowHeight)
         XCTAssertGreaterThan(try alpha(middle, x: 12, y: 1), 0)

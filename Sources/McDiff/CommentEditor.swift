@@ -86,7 +86,7 @@ final class CommentEditorController: NSObject, NSTextViewDelegate, NSTextFieldDe
         cancelButton.toolTip = "Cancel (Escape)"
         let buttons = Style.stack([], spacing: 6)
         if !isNew, onDelete != nil {
-            buttons.addArrangedSubview(Style.button("Delete", icon: "trash", target: self, action: #selector(deleteComment)))
+            buttons.addArrangedSubview(Style.button("Delete", icon: .delete, target: self, action: #selector(deleteComment)))
         }
         buttons.addArrangedSubview(Style.spacer())
         buttons.addArrangedSubview(cancelButton)

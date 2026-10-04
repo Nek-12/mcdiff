@@ -15,7 +15,7 @@ enum Style {
         field.lineBreakMode = .byTruncatingMiddle
         return field
     }
-    static func button(_ title: String, icon: String? = nil, target: AnyObject?, action: Selector) -> NSButton {
+    static func button(_ title: String, icon: Icons.Symbol? = nil, target: AnyObject?, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: target, action: action)
         button.bezelStyle = .glass
         button.toolTip = title.isEmpty ? nil : title
@@ -54,38 +54,71 @@ enum Style {
 }
 
 enum Icons {
-    private struct TintKey: Hashable {
-        let name: String
-        let dark: Bool
-        let color: NSColor
+    enum Symbol: String, CaseIterable {
+        case home = "house"
+        case refresh = "arrow.clockwise"
+        case account = "person.crop.circle"
+        case folder = "folder"
+        case recents = "clock.arrow.circlepath"
+        case comment = "bubble"
+        case next = "arrow.down"
+        case previous = "arrow.up"
+        case review = "checkmark"
+        case finish = "checkmark.circle"
+        case wrap = "arrow.turn.down.left"
+        case unified = "rectangle"
+        case split = "rectangle.split.2x1"
+        case search = "magnifyingglass"
+        case close = "xmark"
+        case copy = "doc.on.doc"
+        case export = "square.and.arrow.down"
+        case compare = "arrow.left.arrow.right"
+        case pullRequest = "arrow.triangle.pull"
+        case chevronDown = "chevron.down"
+        case chevronRight = "chevron.right"
+        case delete = "trash"
+        case link = "link"
+        case document = "doc.text"
     }
-    private static var cache: [String: NSImage] = [:]
-    private static var tinted: [TintKey: NSImage] = [:]
-    static func toolbarImage(_ name: String) -> NSImage? {
-        guard let image = (image(name) ?? NSImage(systemSymbolName: name, accessibilityDescription: nil))?.copy() as? NSImage else { return nil }
-        image.size = NSSize(width: 20, height: 20)
-        return image
-    }
-    static func draw(_ name: String, in rect: NSRect, color: NSColor = .secondaryLabelColor) {
-        let key = TintKey(name: name, dark: Style.dark, color: color)
-        if tinted[key] == nil, let original = image(name) {
-            tinted[key] = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { bounds in
-                original.draw(in: bounds)
-                color.setFill()
-                bounds.fill(using: .sourceAtop)
-                return true
-            }
+
+    static let toolbarPointSize: CGFloat = 16
+    private static let configuration = NSImage.SymbolConfiguration(pointSize: toolbarPointSize, weight: .regular, scale: .medium)
+    private static var cache: [Symbol: NSImage] = [:]
+
+    static func configureSearchField(_ field: NSSearchField) {
+        guard let cell = field.cell as? NSSearchFieldCell else {
+            assertionFailure("Search field must use NSSearchFieldCell")
+            NSLog("McDiff: Search field must use NSSearchFieldCell")
+            return
         }
-        tinted[key]?.draw(in: rect)
+        cell.searchButtonCell?.image = image(.search)
     }
-    static func image(_ name: String) -> NSImage? {
-        if let value = cache[name] { return value }
-        guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Resources/Lucide"),
-              let image = NSImage(contentsOf: url) else { return nil }
-        image.size = NSSize(width: 16, height: 16)
-        image.isTemplate = true
-        cache[name] = image
-        return image
+
+    static func draw(_ symbol: Symbol, in rect: NSRect, color: NSColor = .secondaryLabelColor) {
+        guard let colored = image(symbol).withSymbolConfiguration(.init(paletteColors: [color])) else {
+            assertionFailure("Could not color SF Symbol \(symbol.rawValue)")
+            NSLog("McDiff: Could not color SF Symbol %@", symbol.rawValue)
+            return
+        }
+        colored.isTemplate = false
+        let size = colored.size
+        let scale = min(rect.width / size.width, rect.height / size.height)
+        let target = NSRect(x: rect.midX - size.width * scale / 2, y: rect.midY - size.height * scale / 2,
+                            width: size.width * scale, height: size.height * scale)
+        colored.draw(in: target)
+    }
+
+    static func image(_ symbol: Symbol) -> NSImage {
+        if let value = cache[symbol] { return value }
+        guard let source = NSImage(systemSymbolName: symbol.rawValue, accessibilityDescription: nil),
+              let configured = source.withSymbolConfiguration(configuration) else {
+            assertionFailure("Unavailable SF Symbol \(symbol.rawValue)")
+            NSLog("McDiff: Unavailable SF Symbol %@", symbol.rawValue)
+            return NSImage()
+        }
+        configured.isTemplate = true
+        cache[symbol] = configured
+        return configured
     }
 }
 

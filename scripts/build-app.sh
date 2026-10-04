@@ -10,7 +10,7 @@ cp scripts/Info.plist "$APP/Contents/Info.plist"
 swift scripts/make-icon.swift "$PWD/.build/AppIcon.iconset" "$PWD/Sources/McDiff/Resources/Lucide/git-compare-arrows.svg"
 iconutil -c icns "$PWD/.build/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 for bundle in "$BIN"/*.bundle; do
-    [[ -e "$bundle" ]] && cp -R "$bundle" "$APP/Contents/Resources/"
+    [[ -e "$bundle" ]] && rsync -a --delete "$bundle/" "$APP/Contents/Resources/$(basename "$bundle")/"
 done
 codesign --force --deep --sign "Developer ID Application: Respawn LLC (WY) (7L6T5KD8TA)" "$APP"
 echo "$APP"

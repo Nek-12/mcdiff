@@ -31,7 +31,7 @@ final class ComparisonSheet: NSWindowController {
         tabs.setToolTip("Compare local branches, revisions, or working changes", forSegment: 1)
         if #available(macOS 27, *) { tabs.role = .tabs }
         let title = Style.label("Open review", size: 17, weight: .semibold)
-        let close = Style.button("", icon: "x", target: self, action: #selector(cancel))
+        let close = Style.button("", icon: .close, target: self, action: #selector(cancel))
         close.keyEquivalent = "\u{1b}"; close.toolTip = "Close"
         let header = Style.stack([title, Style.spacer(), tabs, close], spacing: 16)
         header.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(header)
@@ -56,7 +56,7 @@ final class ComparisonSheet: NSWindowController {
         repositoryField.placeholderString = "Choose a local Git checkout…"
         repositoryField.isEditable = false
         repositoryField.lineBreakMode = .byTruncatingMiddle
-        let browse = Style.button("Choose…", icon: "folder-open", target: self, action: #selector(chooseFolder))
+        let browse = Style.button("Choose…", icon: .folder, target: self, action: #selector(chooseFolder))
         let repoRow = Style.stack([repositoryField, browse])
         let baseLabel = Style.label("Base")
         let targetLabel = Style.label("Target")
@@ -80,7 +80,7 @@ final class ComparisonSheet: NSWindowController {
         refs.widthAnchor.constraint(equalTo: localStack.widthAnchor).isActive = true
         baseField.widthAnchor.constraint(equalTo: targetField.widthAnchor).isActive = true
         localStack.distribution = .gravityAreas
-        openButton = Style.button("Open review", icon: "git-compare-arrows", target: self, action: #selector(openReview))
+        openButton = Style.button("Open review", icon: .compare, target: self, action: #selector(openReview))
         openButton.keyEquivalent = "\r"
         let actions = Style.stack([descriptionField, Style.spacer(), openButton])
         actions.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(actions)

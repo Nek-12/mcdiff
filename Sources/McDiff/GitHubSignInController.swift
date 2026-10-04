@@ -45,7 +45,7 @@ final class GitHubSignInController: NSWindowController, NSWindowDelegate {
         continueButton.keyEquivalent = "\r"
         retryButton = Style.button("Retry", target: self, action: #selector(requestCode))
         retryButton.toolTip = "Request a fresh GitHub sign-in code"
-        let cancel = Style.button("", icon: "x", target: self, action: #selector(cancelSignIn))
+        let cancel = Style.button("", icon: .close, target: self, action: #selector(cancelSignIn))
         cancel.toolTip = "Cancel GitHub sign-in"
         cancel.keyEquivalent = "\u{1b}"
         let heading = Style.stack([title, Style.spacer(), cancel])

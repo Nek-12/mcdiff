@@ -55,6 +55,22 @@ final class ToolbarInteractionTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTAssertEqual(controller.screen, .review)
+            if count == 2, let chrome = window.contentView?.superview {
+                let separator = try XCTUnwrap(toolbar.items.compactMap { $0 as? NSTrackingSeparatorToolbarItem }.first)
+                let split = separator.splitView
+                for width in [CGFloat(300), 350, 280] {
+                    split.setPosition(width, ofDividerAt: separator.dividerIndex)
+                    chrome.layoutSubtreeIfNeeded()
+                    let refresh = try XCTUnwrap(descendants(of: chrome).first { $0.toolTip == "Refresh comparison (⌘R)" })
+                    let home = try XCTUnwrap(descendants(of: chrome).first { $0.toolTip == "Home" })
+                    let sidebar = split.subviews[separator.dividerIndex]
+                    let edge = chrome.convert(sidebar.bounds, from: sidebar).maxX
+                    let refreshFrame = chrome.convert(refresh.bounds, from: refresh)
+                    let homeFrame = chrome.convert(home.bounds, from: home)
+                    XCTAssertEqual(refreshFrame.maxX, edge, accuracy: 12, "Sidebar actions must follow the divider")
+                    XCTAssertEqual(homeFrame.maxX, refreshFrame.minX, accuracy: 1)
+                }
+            }
             let finish = try XCTUnwrap(toolbar.items.last)
             XCTAssertEqual(finish.label, "Finish review")
             XCTAssertEqual(finish.style, .prominent)
