@@ -1233,7 +1233,7 @@ final class PinnedFileHeader: NSView {
         material.layer?.cornerRadius = 5
         material.layer?.masksToBounds = true
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.3).cgColor
         material.addSubview(tint)
         fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
         fade.locations = [0, 0.82, 1]
