@@ -131,7 +131,9 @@ final class FinishReviewTests: XCTestCase {
         controller.start(store: store, arguments: ["--repo", directory.path])
         try await waitFor { controller.screen == .review }
         let toolbar = try XCTUnwrap(window.toolbar)
-        let actions = try XCTUnwrap(toolbar.items.last as? NSToolbarItemGroup)
+        let actions = try XCTUnwrap(toolbar.items.compactMap { $0 as? NSToolbarItemGroup }.first {
+            $0.subitems.first?.label == "Comments"
+        })
         let comments = try XCTUnwrap(actions.subitems.first { $0.label == "Comments" })
         XCTAssertEqual(comments.badge, .count(0))
         let view = try XCTUnwrap(descendants(try XCTUnwrap(window.contentView)).compactMap { $0 as? DiffViewport }.first)

@@ -55,7 +55,12 @@ final class ToolbarInteractionTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTAssertEqual(controller.screen, .review)
-            let navigation = try XCTUnwrap(toolbar.items.last as? NSToolbarItemGroup)
+            let finish = try XCTUnwrap(toolbar.items.last)
+            XCTAssertEqual(finish.label, "Finish review")
+            XCTAssertEqual(finish.style, .prominent)
+            let navigation = try XCTUnwrap(toolbar.items.compactMap { $0 as? NSToolbarItemGroup }.first {
+                $0.subitems.first?.label == "Comments"
+            })
             XCTAssertEqual(navigation.subitems.map(\.label), ["Comments", "Next file", "Previous file", "Review & next"])
             XCTAssertFalse(toolbar.items.contains { $0.label == "Comments" })
             let commentItem = try XCTUnwrap(navigation.subitems.first)
@@ -74,6 +79,35 @@ final class ToolbarInteractionTests: XCTestCase {
     }
 
     @MainActor
+    func testWrapStateRemainsNeutralAndPersistsAcrossControllers() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ReviewStore(directory: directory)
+        let controller = ReviewWindowController(github: GitHubClient(clientID: "test", credentials: ToolbarCredentials()))
+        controller.start(store: store, arguments: [])
+        let toolbar = try XCTUnwrap(controller.window?.toolbar)
+        let wrap = try XCTUnwrap(controller.toolbar(toolbar, itemForItemIdentifier: .init("wrap"), willBeInsertedIntoToolbar: false))
+        let view = try XCTUnwrap(descendants(of: try XCTUnwrap(controller.window?.contentView)).compactMap { $0 as? DiffViewport }.first)
+        for enabled in [true, false, true] {
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(wrap.action), to: wrap.target, from: wrap))
+            XCTAssertEqual(view.softWrap, enabled)
+            XCTAssertEqual(wrap.title, enabled ? "Wrap on" : "Wrap off")
+            XCTAssertEqual(wrap.style, .plain)
+            XCTAssertEqual(wrap.image?.isTemplate, !enabled, "Only the on icon carries the accent palette")
+            XCTAssertEqual(try store.loadPreferences().softWrap, enabled)
+        }
+        let reopened = ReviewWindowController(github: GitHubClient(clientID: "test", credentials: ToolbarCredentials()))
+        reopened.start(store: store, arguments: [])
+        let reopenedToolbar = try XCTUnwrap(reopened.window?.toolbar)
+        let restored = try XCTUnwrap(reopened.toolbar(reopenedToolbar, itemForItemIdentifier: .init("wrap"), willBeInsertedIntoToolbar: false))
+        XCTAssertEqual(restored.title, "Wrap on")
+        XCTAssertEqual(restored.style, .plain)
+        XCTAssertFalse(controller.window!.isVisible)
+        XCTAssertFalse(reopened.window!.isVisible)
+    }
+
+    @MainActor
     func testLayoutToggleShowsDestinationAndUpdatesViewport() throws {
         _ = NSApplication.shared
         let controller = ReviewWindowController()
@@ -89,10 +123,12 @@ final class ToolbarInteractionTests: XCTestCase {
         XCTAssertTrue(NSApp.sendAction(action, to: toggle.target, from: toggle))
         XCTAssertEqual(viewport.diffLayout, .unified)
         XCTAssertEqual(toggle.title, "Split")
+        XCTAssertEqual(toggle.style, .plain)
         XCTAssertEqual(toggle.toolTip, "Switch to split diff")
         XCTAssertTrue(NSApp.sendAction(action, to: toggle.target, from: toggle))
         XCTAssertEqual(viewport.diffLayout, .split)
         XCTAssertEqual(toggle.title, "Unified")
+        XCTAssertEqual(toggle.style, .plain)
         XCTAssertEqual(toggle.toolTip, "Switch to unified diff")
     }
 

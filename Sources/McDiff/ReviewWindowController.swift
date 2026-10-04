@@ -37,7 +37,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var refreshButton: NSToolbarItem!
     private var commentsButton: NSToolbarItem!
     private var finishSheet: FinishReviewSheet?
-    private var wrapButton: NSToolbarItemGroup!
+    private var wrapButton: NSToolbarItem!
     private var layoutButton: NSToolbarItem!
     private let splitController = NSSplitViewController()
     private var toolbarItems: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
@@ -45,7 +45,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         .init("home"), .init("refresh"), .init("sidebarDivider"),
         .init("search"), .space, .init("status"), .flexibleSpace,
         .init("wrap"), .space, .init("split"),
-        .space, .init("finish"), .space, .init("navigation")
+        .space, .init("navigation"), .space, .init("finish")
     ]
     private let emptyToolbarOrder: [NSToolbarItem.Identifier] = [
         .init("welcomeSources"), .init("homeRefresh"), .init("status"), .flexibleSpace,
@@ -92,7 +92,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             preferences = try store!.loadPreferences()
             updateFilters()
             diff.softWrap = preferences.softWrap
-            wrapButton.setSelected(preferences.softWrap, at: 0)
+            updateWrapButton()
             diff.diffLayout = preferences.diffLayout
             updateLayoutButton()
             if let i = args.firstIndex(of: "--repo"), args.indices.contains(i + 1) {
@@ -183,26 +183,23 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         ]
         reviewActions = navigation
         reviewActions.visibilityPriority = .high
-        wrapButton = NSToolbarItemGroup(itemIdentifier: .init("wrap"), titles: ["Wrap"],
-            selectionMode: .selectAny, labels: ["Soft wrap"], target: self, action: #selector(wrapChanged))
-        wrapButton.subitems.first?.image = toolbarIcon("arrow.turn.down.left")
-        for group in [navigation, wrapButton!] {
-            group.isBordered = true
-            group.autovalidates = false
-            toolbarItems[group.itemIdentifier] = group
-        }
+        navigation.isBordered = true
+        navigation.autovalidates = false
+        toolbarItems[navigation.itemIdentifier] = navigation
+        wrapButton = item("wrap", "Wrap off", "arrow.turn.down.left", #selector(wrapChanged), text: true)
+        updateWrapButton()
         layoutButton = item("split", "Unified", "rectangle", #selector(layoutChanged), text: true)
         updateLayoutButton()
         finishButton = item("finish", "Finish review", "check-check", #selector(finishReview), text: true)
+        finishButton.style = .prominent
         finishButton.visibilityPriority = .high
-        for group in [welcomeSources, navigation, wrapButton!] {
+        for group in [welcomeSources, navigation] {
             for subitem in group.subitems { subitem.toolTip = subitem.label }
         }
         welcomeSources.subitems[0].toolTip = "Open comparison (⌘O)"
         navigation.subitems[1].toolTip = "Next file (⌥↓)"
         navigation.subitems[2].toolTip = "Previous file (⌥↑)"
         navigation.subitems[3].toolTip = "Mark reviewed and go to the next unreviewed file (⌘J)"
-        wrapButton.subitems.first?.toolTip = "Toggle soft wrapping of long lines"
 
         spinner.style = .spinning; spinner.controlSize = .small; spinner.isDisplayedWhenStopped = false
         let context = NSToolbarItem(itemIdentifier: .init("status"))
@@ -523,6 +520,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         commentsButton?.toolTip = "\(progress.comments.count) comments"
         commentsButton?.badge = .count(progress.comments.count)
         commentsButton?.isEnabled = !progress.comments.isEmpty && !busy
+        wrapButton?.isEnabled = !busy
         layoutButton?.isEnabled = snapshot != nil && !busy
     }
     private func setBusy(_ value: Bool, message: String? = nil) {
@@ -582,14 +580,25 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         return result
     }
     @objc private func wrapChanged() {
+        guard !busy else { return }
         let previous = preferences.softWrap
-        preferences.softWrap = wrapButton.isSelected(at: 0)
+        preferences.softWrap.toggle()
         do { try savePreferences(); diff.softWrap = preferences.softWrap }
         catch {
             preferences.softWrap = previous
-            wrapButton.setSelected(previous, at: 0)
             showError(error, title: "Could not save wrapping preference")
         }
+        updateWrapButton()
+    }
+    private func updateWrapButton() {
+        let title = preferences.softWrap ? "Wrap on" : "Wrap off"
+        wrapButton?.title = title
+        wrapButton?.label = title
+        wrapButton?.paletteLabel = title
+        wrapButton?.toolTip = preferences.softWrap ? "Turn soft wrapping off" : "Turn soft wrapping on"
+        let image = Icons.toolbarImage("arrow.turn.down.left")
+        wrapButton?.image = preferences.softWrap
+            ? image?.withSymbolConfiguration(.init(paletteColors: [.controlAccentColor])) : image
     }
     @objc private func layoutChanged() {
         guard !busy, settleDraft() else { return }
