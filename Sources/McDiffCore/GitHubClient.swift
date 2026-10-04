@@ -195,7 +195,7 @@ public actor GitHubClient {
         let generation = generation
         let response: RevisionResponse = try await api(path: "/repos/\(pr.repositoryKey)/pulls/\(pr.number)", token: token)
         guard self.generation == generation else { throw CancellationError() }
-        return try GitHubPRRevisions(base: response.base.sha, head: response.head.sha)
+        return try GitHubPRRevisions(base: response.base.sha, head: response.head.sha, title: response.title)
     }
 
     private func loadCredential() throws -> GitHubCredential? {
@@ -374,6 +374,7 @@ private struct SearchResponse: Decodable {
 }
 
 private struct RevisionResponse: Decodable {
+    let title: String
     let base: Revision
     let head: Revision
     struct Revision: Decodable { let sha: String }

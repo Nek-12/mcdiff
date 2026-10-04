@@ -473,6 +473,32 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertEqual(updated.title, "o/r #1")
     }
 
+    func testPullRequestRenamePreservesReviewIdentityAndFileFingerprints() throws {
+        try write("tracked.swift", "new content\n")
+        _ = try repo.git(["commit", "-am", "change"])
+        let original = try repo.load(.init(repository: root.path, base: "HEAD~1", target: "HEAD",
+                                           pullRequestURL: "https://github.com/o/r/pull/1",
+                                           pullRequestTitle: "Original title"))
+        let renamed = try repo.load(.init(repository: root.path, base: "HEAD~1", target: "HEAD",
+                                          pullRequestURL: "https://github.com/o/r/pull/1",
+                                          pullRequestTitle: "Renamed title"))
+        XCTAssertEqual(original.identity, renamed.identity)
+        XCTAssertEqual(original.files.map(\.fingerprint), renamed.files.map(\.fingerprint))
+        XCTAssertEqual(original.title, "o/r #1 Original title")
+        XCTAssertEqual(renamed.title, "o/r #1 Renamed title")
+    }
+
+    func testSavedComparisonRequestsDecodeWithoutTitleAndRoundTripWithTitle() throws {
+        let legacy = Data(#"{"repository":"/repo","base":"main","target":"feature","mergeBase":true,"pullRequestURL":"https://github.com/o/r/pull/1"}"#.utf8)
+        let decoded = try JSONDecoder().decode(ComparisonRequest.self, from: legacy)
+        XCTAssertNil(decoded.pullRequestTitle)
+        XCTAssertEqual(decoded.pullRequestURL, "https://github.com/o/r/pull/1")
+        let titled = ComparisonRequest(repository: decoded.repository, base: decoded.base,
+                                       target: decoded.target, mergeBase: decoded.mergeBase,
+                                       pullRequestURL: decoded.pullRequestURL, pullRequestTitle: "Actual title")
+        XCTAssertEqual(try JSONDecoder().decode(ComparisonRequest.self, from: JSONEncoder().encode(titled)), titled)
+    }
+
     func testMergeBaseExcludesChangesOnlyOnBaseBranch() throws {
         _ = try repo.git(["checkout", "-b", "feature"])
         try write("feature.swift", "feature\n")
@@ -484,6 +510,61 @@ final class GitRepositoryTests: XCTestCase {
         _ = try repo.git(["commit", "-m", "main"])
         let snapshot = try load(target: "feature")
         XCTAssertEqual(snapshot.files.map(\.path), ["feature.swift"])
+    }
+
+    func testPullRequestDiffExcludesLaterBaseChangesEvenWithConflictsAndDirtyUnrelatedCheckout() throws {
+        let ancestor = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "-b", "feature"])
+        try write("tracked.swift", "pull request edit\n")
+        try write("feature.swift", "pull request addition\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "PR changes"])
+        let head = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "main"])
+        try write("tracked.swift", "conflicting change from another PR\n")
+        try write("main.swift", "another merged PR\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "another PR merged"])
+        let base = try repo.revision("HEAD")
+
+        // Neither the currently checked-out branch nor any local edits belong to this PR.
+        _ = try repo.git(["checkout", "-b", "unrelated"])
+        try write("unrelated.swift", "unrelated commit\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "unrelated local branch"])
+        try write("staged.swift", "local staged addition\n")
+        _ = try repo.git(["add", "staged.swift"])
+        try write("tracked.swift", "local unstaged edit\n")
+        try write("untracked.swift", "local untracked addition\n")
+        _ = try repo.git(["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        let refs = try repo.git(["show-ref"]).data
+        let branch = try repo.git(["symbolic-ref", "HEAD"]).text
+        let status = try repo.git(["status", "--porcelain=v1", "-z"]).data
+        let index = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+
+        let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/123")
+        let request = try pr.resolve(localRepository: root.path,
+                                     revisions: GitHubPRRevisions(base: base, head: head, title: "PR changes"))
+        let snapshot = try repo.load(request)
+        XCTAssertEqual(snapshot.baseRevision, ancestor)
+        XCTAssertEqual(snapshot.targetRevision, head)
+        XCTAssertEqual(snapshot.files.map(\.path), ["feature.swift", "tracked.swift"])
+        let edited = try XCTUnwrap(snapshot.files.first { $0.path == "tracked.swift" })
+        let lines = edited.hunks.flatMap(\.lines)
+        XCTAssertEqual(lines.filter { $0.kind == .deletion }.map(\.text), ["base"])
+        XCTAssertEqual(lines.filter { $0.kind == .addition }.map(\.text), ["pull request edit"])
+        XCTAssertEqual(try repo.content(snapshot: snapshot, file: edited, side: .old), "base\n")
+        XCTAssertEqual(try repo.content(snapshot: snapshot, file: edited, side: .new), "pull request edit\n")
+
+        // A direct base-tip comparison would falsely show the other PR's addition as removed.
+        let direct = try load(base: base, target: head, mergeBase: false)
+        XCTAssertEqual(direct.files.first { $0.path == "main.swift" }?.status, "D")
+        XCTAssertEqual(try repo.git(["show-ref"]).data, refs)
+        XCTAssertEqual(try repo.git(["symbolic-ref", "HEAD"]).text, branch)
+        XCTAssertEqual(try repo.git(["status", "--porcelain=v1", "-z"]).data, status)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), index)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("tracked.swift"), encoding: .utf8),
+                       "local unstaged edit\n")
     }
 
     func testRenameDeletionModeAndBinaryChanges() throws {
@@ -597,7 +678,8 @@ final class GitRepositoryTests: XCTestCase {
                         "https://github.com/owner/repo/pull/-2"] {
             XCTAssertThrowsError(try GitHubPR.parse(invalid))
         }
-        let revisions = try GitHubPRRevisions(base: String(repeating: "a", count: 40), head: String(repeating: "b", count: 40))
+        let revisions = try GitHubPRRevisions(base: String(repeating: "a", count: 40), head: String(repeating: "b", count: 40),
+                                            title: "Update code")
         XCTAssertThrowsError(try pr.resolve(localRepository: root.path, revisions: revisions)) { error in
             XCTAssertTrue(error.localizedDescription.contains("no GitHub remote"))
         }
@@ -625,10 +707,12 @@ final class GitRepositoryTests: XCTestCase {
         let index = try Data(contentsOf: root.appendingPathComponent(".git/index"))
         let branch = try repo.git(["symbolic-ref", "HEAD"]).text
         let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/123")
-        let revisions = try GitHubPRRevisions(base: base, head: head)
+        let revisions = try GitHubPRRevisions(base: base, head: head, title: "Improve review")
         let request = try pr.resolve(localRepository: root.path, revisions: revisions)
         XCTAssertEqual(request.base, base)
         XCTAssertEqual(request.target, head)
+        XCTAssertEqual(request.pullRequestTitle, "Improve review")
+        XCTAssertEqual(try repo.load(request).title, "owner/repo #123 Improve review")
         XCTAssertEqual(try repo.revision(head), head)
         XCTAssertEqual(try repo.git(["show-ref"]).data, refs)
         XCTAssertEqual(try repo.git(["symbolic-ref", "HEAD"]).text, branch)
@@ -643,7 +727,7 @@ final class GitRepositoryTests: XCTestCase {
         _ = try repo.git(["config", "url.https://github.com/.insteadOf", "work:"])
         let sha = try repo.revision("HEAD")
         let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/123")
-        let request = try pr.resolve(localRepository: root.path, revisions: GitHubPRRevisions(base: sha, head: sha))
+        let request = try pr.resolve(localRepository: root.path, revisions: GitHubPRRevisions(base: sha, head: sha, title: "Alias"))
         XCTAssertEqual(request.base, sha)
         XCTAssertEqual(request.target, sha)
     }

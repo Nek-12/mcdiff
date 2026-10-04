@@ -100,9 +100,12 @@ public struct ComparisonRequest: Codable, Equatable, Sendable {
     public let target: String?
     public let mergeBase: Bool
     public let pullRequestURL: String?
-    public init(repository: String, base: String, target: String? = nil, mergeBase: Bool = true, pullRequestURL: String? = nil) {
+    public let pullRequestTitle: String?
+    public init(repository: String, base: String, target: String? = nil, mergeBase: Bool = true,
+                pullRequestURL: String? = nil, pullRequestTitle: String? = nil) {
         self.repository = repository; self.base = base; self.target = target
         self.mergeBase = mergeBase; self.pullRequestURL = pullRequestURL
+        self.pullRequestTitle = pullRequestTitle
     }
 }
 

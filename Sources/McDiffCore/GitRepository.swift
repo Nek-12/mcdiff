@@ -74,7 +74,7 @@ public struct GitRepository: Sendable {
         let title: String
         if let url = request.pullRequestURL {
             let pr = try GitHubPR.parse(url)
-            title = "\(pr.repositoryKey) #\(pr.number)"
+            title = "\(pr.repositoryKey) #\(pr.number)" + (request.pullRequestTitle.map { " \($0)" } ?? "")
         } else { title = "\(request.base) → \(request.target ?? "Working tree")" }
         return ReviewSnapshot(request: request, identity: identity,
                               title: title,

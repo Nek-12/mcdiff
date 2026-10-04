@@ -210,10 +210,11 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         context.isBordered = false
         toolbarItems[context.itemIdentifier] = context
         search.placeholderString = "Search review…"
+        search.cell?.lineBreakMode = .byTruncatingTail
         search.delegate = self
         search.sendsSearchStringImmediately = true
         searchItem.searchField = search
-        searchItem.preferredWidthForSearchField = 230
+        searchItem.preferredWidthForSearchField = 380
         searchItem.label = "Search review"
         searchItem.toolTip = "Search paths and displayed text (⌘F)"
         search.toolTip = "Search paths and displayed text (⌘F); Return / Shift-Return navigates matches"
@@ -445,6 +446,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 }.value
                 guard let self else { return }
                 self.snapshot = result.0; self.progress = result.1
+                self.search.placeholderString = Self.searchPlaceholder(for: result.0)
+                self.search.toolTip = "\(result.0.title)\nSearch paths and displayed text (⌘F)"
+                self.searchItem.toolTip = self.search.toolTip
                 self.screen = .review
                 self.home.resumeTitle = result.0.title
                 self.sortFiles()
@@ -724,15 +728,40 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         let text = ReviewExport.markdown(snapshot: snapshot, progress: progress)
         let sheet = FinishReviewSheet(text: text, pasteboard: pasteboard, archive: {
             _ = try await Task.detached { try store.finishReview(snapshot: snapshot) }.value
-        }, onClose: { [weak self] completed in
+        }, onClose: { [weak self] completion in
             guard let self else { return }
             self.finishSheet = nil
-            if completed { self.clearCompletedReview() }
+            switch completion {
+            case .cancelled: break
+            case .reset: self.resetCompletedReview()
+            case .finished: self.clearCompletedReview()
+            }
             self.updateActions()
         })
         finishSheet = sheet
         updateActions()
         return sheet
+    }
+    static func searchPlaceholder(for snapshot: ReviewSnapshot) -> String {
+        if let url = snapshot.request.pullRequestURL, let pr = try? GitHubPR.parse(url) {
+            return "Search PR #\(pr.number) \(snapshot.request.pullRequestTitle ?? pr.repositoryKey)"
+        }
+        let repository = URL(fileURLWithPath: snapshot.request.repository).lastPathComponent
+        func shortRef(_ value: String) -> String {
+            [40, 64].contains(value.count) && value.allSatisfy { $0.isASCII && $0.isHexDigit }
+                ? String(value.prefix(8)) : value
+        }
+        return "Search \(repository): \(shortRef(snapshot.request.base)) → \(snapshot.request.target.map(shortRef) ?? "Working tree")"
+    }
+    private func resetCompletedReview() {
+        let currentFile = focused
+        progress = ReviewProgress()
+        commentEditor = nil
+        diff.setComments([])
+        diff.expanded = Set(files.filter { preferences.filters.skipReason(for: $0) == nil }.map(\.path))
+        diff.setFiles(files, presentations: diff.presentations)
+        rebuildSidebar()
+        if files.indices.contains(currentFile) { diff.navigate(to: currentFile, expand: false) }
     }
     private func clearCompletedReview() {
         snapshot = nil
@@ -741,6 +770,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         files = []
         focused = 0
         search.stringValue = ""
+        search.placeholderString = "Search review…"
         searchMatchingFiles = nil
         diff.expanded = []
         diff.markdownContent = [:]
@@ -953,6 +983,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         alert.messageText = title; alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: "OK")
         if let recovery { alert.addButton(withTitle: recovery) }
+        for button in alert.buttons { button.bezelStyle = .glass }
         alert.beginSheetModal(for: window) { response in if response == .alertSecondButtonReturn { action?() } }
     }
 }

@@ -184,6 +184,7 @@ final class ComparisonSheet: NSWindowController {
     private func showError(_ message: String) {
         guard let window else { return }
         let alert = NSAlert(); alert.messageText = "Cannot open review"; alert.informativeText = message
+        alert.addButton(withTitle: "OK").bezelStyle = .glass
         alert.beginSheetModal(for: window)
     }
     @objc private func cancel() { dismiss() }

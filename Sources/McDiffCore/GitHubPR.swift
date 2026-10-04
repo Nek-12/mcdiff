@@ -46,7 +46,8 @@ public struct GitHubPR: Sendable, Equatable {
             _ = try repository.revision(oid)
         }
         return ComparisonRequest(repository: localRepository, base: revisions.base,
-                                 target: revisions.head, mergeBase: true, pullRequestURL: url)
+                                 target: revisions.head, mergeBase: true, pullRequestURL: url,
+                                 pullRequestTitle: revisions.title)
     }
 
     private static func remoteKey(_ remote: String) -> String? {
@@ -65,12 +66,17 @@ public struct GitHubPR: Sendable, Equatable {
 public struct GitHubPRRevisions: Sendable, Equatable {
     public let base: String
     public let head: String
+    public let title: String
 
-    public init(base: String, head: String) throws {
+    public init(base: String, head: String, title: String) throws {
         guard [base, head].allSatisfy({ oid in
             [40, 64].contains(oid.count) && oid.allSatisfy { $0.isHexDigit && $0.isASCII }
         }) else { throw GitError("GitHub returned an invalid commit identifier.") }
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GitHubError.invalidResponse
+        }
         self.base = base
         self.head = head
+        self.title = title
     }
 }

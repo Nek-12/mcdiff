@@ -28,7 +28,7 @@ final class FinishReviewTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let text = "# Review\n\n## source.kt · new · 1\n\nPreserve this comment\n"
         var attempts = 0
-        var closed: Bool?
+        var closed: FinishReviewSheet.Completion?
         let sheet = FinishReviewSheet(text: text, pasteboard: pasteboard, archive: {
             attempts += 1
             throw GitError("Storage is not writable")
@@ -62,7 +62,7 @@ final class FinishReviewTests: XCTestCase {
         sheet.copyAgain()
         XCTAssertEqual(pasteboard.string(forType: .string), text)
         sheet.cancel()
-        XCTAssertEqual(closed, false)
+        XCTAssertEqual(closed, .cancelled)
         XCTAssertFalse(window.isVisible)
     }
 
@@ -100,6 +100,17 @@ final class FinishReviewTests: XCTestCase {
         XCTAssertEqual(controller.screen, .review)
         XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).comments, [comment])
 
+        let reset = try XCTUnwrap(controller.prepareFinishReview(pasteboard: pasteboard))
+        reset.reset()
+        try await waitFor { controller.validateMenuItem(NSMenuItem(title: "", action: NSSelectorFromString("finishReview"), keyEquivalent: "")) }
+        XCTAssertEqual(controller.screen, .review)
+        XCTAssertNotNil(controller.home.resumeTitle)
+        XCTAssertTrue(try store.loadProgress(identity: snapshot.identity).comments.isEmpty)
+        XCTAssertTrue(try store.loadProgress(identity: snapshot.identity).reviewed.isEmpty)
+        let resetView = try XCTUnwrap(descendants(try XCTUnwrap(window.contentView)).compactMap { $0 as? DiffViewport }.first)
+        XCTAssertTrue(resetView.expanded.contains(file.path))
+        XCTAssertFalse(resetView.isReviewed(file))
+
         let finished = try XCTUnwrap(controller.prepareFinishReview(pasteboard: pasteboard))
         finished.finish()
         try await waitFor { controller.screen == .home }
@@ -108,8 +119,10 @@ final class FinishReviewTests: XCTestCase {
         XCTAssertTrue(try store.loadProgress(identity: snapshot.identity).reviewed.isEmpty)
         let archives = try FileManager.default.contentsOfDirectory(at: storage.appendingPathComponent("completed-reviews"),
                                                                   includingPropertiesForKeys: nil)
-        let archived = try JSONDecoder().decode(ReviewProgress.self, from: Data(contentsOf: XCTUnwrap(archives.first)
-            .appendingPathComponent("progress.json")))
+        XCTAssertEqual(archives.count, 2)
+        let records = try archives.map { try JSONDecoder().decode(ReviewProgress.self, from:
+            Data(contentsOf: $0.appendingPathComponent("progress.json"))) }
+        let archived = try XCTUnwrap(records.first { !$0.comments.isEmpty })
         XCTAssertEqual(archived.comments, [comment])
         XCTAssertEqual(archived.reviewed, [file.path: file.fingerprint])
         controller.resumeReview()

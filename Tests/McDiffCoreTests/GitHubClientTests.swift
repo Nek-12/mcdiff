@@ -239,15 +239,27 @@ final class GitHubClientTests: XCTestCase {
     func testPRMetadataValidatesObjectIDs() async throws {
         let (client, transport, _) = makeClient(signedIn: true)
         let base = String(repeating: "a", count: 40), head = String(repeating: "b", count: 64)
-        transport.responses = [.json(#"{"base":{"sha":"\#(base)"},"head":{"sha":"\#(head)"}}"#),
-                               .json(#"{"base":{"sha":"--evil"},"head":{"sha":"\#(head)"}}"#)]
+        transport.responses = [.json(#"{"title":"Improve review","base":{"sha":"\#(base)"},"head":{"sha":"\#(head)"}}"#),
+                               .json(#"{"title":"Improve review","base":{"sha":"--evil"},"head":{"sha":"\#(head)"}}"#)]
         let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/42")
         let revisions = try await client.revisions(for: pr)
         XCTAssertEqual(revisions.base, base)
         XCTAssertEqual(revisions.head, head)
+        XCTAssertEqual(revisions.title, "Improve review")
+        XCTAssertEqual(transport.requests.count, 1)
         XCTAssertEqual(transport.requests[0].url?.absoluteString, "https://api.github.com/repos/owner/repo/pulls/42")
         do { _ = try await client.revisions(for: pr); XCTFail("Expected invalid SHA") }
         catch { XCTAssertTrue(error.localizedDescription.contains("invalid commit")) }
+    }
+
+    func testPRMetadataRejectsMissingMalformedAndEmptyTitles() async throws {
+        let (client, transport, _) = makeClient(signedIn: true)
+        let sha = String(repeating: "a", count: 40)
+        let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/42")
+        for title in ["", #""title":null,"#, #""title":42,"#, #""title":" \n\t","#] {
+            transport.responses = [.json(#"{\#(title)"base":{"sha":"\#(sha)"},"head":{"sha":"\#(sha)"}}"#)]
+            await assertError(.invalidResponse) { _ = try await client.revisions(for: pr) }
+        }
     }
 
     func testHTTPFailuresSurfaceActionableSafeMessagesIncludingPartialSSO() async throws {

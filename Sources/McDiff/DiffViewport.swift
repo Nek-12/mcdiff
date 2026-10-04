@@ -1218,6 +1218,7 @@ private final class VerticalClipView: NSClipView {
 final class PinnedFileHeader: NSView {
     let cell = DiffCell()
     private let material = NSVisualEffectView()
+    private let tint = NSView()
     private let fade = CAGradientLayer()
     override var isFlipped: Bool { true }
 
@@ -1225,12 +1226,15 @@ final class PinnedFileHeader: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = true
-        material.material = .windowBackground
+        material.material = .hudWindow
         material.blendingMode = .withinWindow
         material.state = .followsWindowActiveState
         material.wantsLayer = true
         material.layer?.cornerRadius = 5
         material.layer?.masksToBounds = true
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        material.addSubview(tint)
         fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
         fade.locations = [0, 0.82, 1]
         fade.startPoint = CGPoint(x: 0.5, y: 1)
@@ -1245,6 +1249,7 @@ final class PinnedFileHeader: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func setHeaderFrame(_ frame: NSRect) {
         material.frame = frame
+        tint.frame = material.bounds
         cell.frame = frame
         CATransaction.begin(); CATransaction.setDisableActions(true)
         fade.frame = material.bounds

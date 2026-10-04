@@ -60,8 +60,8 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
 
         for child in [spinner, status, retryButton] { feedback.addArrangedSubview(child) }
         feedback.alignment = .top
-        let footer = NSStackView(views: [resumeButton, NSView()])
-        for stack in [feedback, footer] { stack.spacing = 12 }
+        feedback.spacing = 12
+        feedback.setContentHuggingPriority(.required, for: .vertical)
         scroll.hasVerticalScroller = true
         scroll.scrollerStyle = NSScroller.preferredScrollerStyle
         scroll.autohidesScrollers = true
@@ -86,10 +86,11 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged),
             name: NSView.boundsDidChangeNotification, object: scroll.contentView)
-        let content = NSStackView(views: [scroll, feedback, footer])
+        let content = NSStackView(views: [scroll, feedback, resumeButton])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
+        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(content)
         let leading = content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18)
@@ -101,7 +102,7 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100)
         ])
-        for child in [feedback, scroll, footer] {
+        for child in [feedback, scroll] {
             child.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
         updateResume()
@@ -174,7 +175,7 @@ final class PRHomeController: NSViewController, NSTableViewDataSource, NSTableVi
     private func configure(_ button: NSButton, action: Selector, tooltip: String) {
         button.target = self
         button.action = action
-        button.bezelStyle = .rounded
+        button.bezelStyle = .glass
         button.toolTip = tooltip
     }
 
@@ -269,7 +270,7 @@ private final class PRSummaryCell: NSTableCellView {
         addSubview(icon)
         link.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
         link.title = ""
-        link.isBordered = false
+        link.bezelStyle = .glass
         link.toolTip = "Open on GitHub"
         link.target = self
         link.action = #selector(openGitHub)

@@ -5,6 +5,22 @@ import XCTest
 
 final class ToolbarInteractionTests: XCTestCase {
     @MainActor
+    func testSearchIdentifiesPRAndLocalComparison() {
+        func snapshot(_ request: ComparisonRequest) -> ReviewSnapshot {
+            ReviewSnapshot(request: request, identity: "review", title: "comparison",
+                           baseRevision: "base", targetRevision: nil, files: [])
+        }
+        XCTAssertEqual(ReviewWindowController.searchPlaceholder(for: snapshot(.init(
+            repository: "/repo", base: "main", pullRequestURL: "https://github.com/owner/repo/pull/42",
+            pullRequestTitle: "Fix a very long title"))), "Search PR #42 Fix a very long title")
+        XCTAssertEqual(ReviewWindowController.searchPlaceholder(for: snapshot(.init(
+            repository: "/checkout/app", base: "main"))), "Search app: main → Working tree")
+        XCTAssertEqual(ReviewWindowController.searchPlaceholder(for: snapshot(.init(
+            repository: "/checkout/app", base: String(repeating: "a", count: 40), target: "feature"))),
+                       "Search app: aaaaaaaa → feature")
+    }
+
+    @MainActor
     func testReviewToolbarCountsSavedCommentsAndKeepsReviewActionAtTrailingEdge() async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
