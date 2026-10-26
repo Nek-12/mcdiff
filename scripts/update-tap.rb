@@ -22,7 +22,7 @@ File.write(File.join(tap, "Casks/mcdiff.rb"), <<~CASK)
     desc "Native code review for agent-generated changes"
     homepage "https://github.com/Nek-12/mcdiff"
 
-    depends_on macos: ">= :tahoe"
+    depends_on macos: :tahoe
 
     app "McDiff.app"
   end

@@ -90,7 +90,7 @@ raise "Wrong version" unless $cask.fields[:version] == version
 raise "Wrong SHA256" unless $cask.fields[:sha256] == Digest::SHA256.file(archive).hexdigest
 raise "Wrong URL" unless $cask.fields[:url] == "https://github.com/Nek-12/mcdiff/releases/download/v#{version}/McDiff-#{version}-macos-universal.zip"
 raise "Wrong app" unless $cask.fields[:app] == "McDiff.app"
-raise "Wrong minimum OS" unless $cask.fields[:depends_on] == {macos: ">= :tahoe"}
+raise "Wrong minimum OS" unless $cask.fields[:depends_on] == {macos: :tahoe}
 RUBY
 expect_failure "Expected McDiff-" ruby scripts/update-tap.rb "$WORK/other.zip" "$WORK/tap"
 expect_failure "Tap checkout not found" ruby scripts/update-tap.rb "$ARCHIVE" "$WORK/no-tap"
