@@ -194,14 +194,15 @@ final class GitRepositoryTests: XCTestCase {
         try write("tracked.swift", original.joined(separator: "\n") + "\n")
         _ = try repo.git(["add", "."])
         _ = try repo.git(["commit", "-m", "context"])
-        for changed in [
+        let changes: [[String]] = [
             ["first"] + original,
             Array(original.dropFirst()),
-            Array(original.prefix(5)) + ["inserted"] + original.dropFirst(5),
-            Array(original.prefix(5)) + original.dropFirst(6),
+            Array(original.prefix(5)) + ["inserted"] + Array(original.dropFirst(5)),
+            Array(original.prefix(5)) + Array(original.dropFirst(6)),
             original + ["last"],
             Array(original.dropLast())
-        ] {
+        ]
+        for changed in changes {
             try write("tracked.swift", changed.joined(separator: "\n") + "\n")
             let snapshot = try load()
             let file = try XCTUnwrap(snapshot.files.first)
