@@ -1087,7 +1087,6 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
 
     static func toolbarAvatar(from image: NSImage) -> NSImage {
-        // 24 points is the largest image that preserves the native circular toolbar button.
         let size = NSSize(width: 24, height: 24)
         let circular = NSImage(size: size, flipped: false) { rect in
             NSBezierPath(ovalIn: rect).addClip()

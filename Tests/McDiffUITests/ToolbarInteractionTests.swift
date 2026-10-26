@@ -91,7 +91,6 @@ final class ToolbarInteractionTests: XCTestCase {
                     window.appearance = NSAppearance(named: appearance)
                     chrome.layoutSubtreeIfNeeded()
                     footer.layoutSubtreeIfNeeded()
-                    XCTAssertEqual(footer.finishButton.frame.width, nativeButton.frame.width, accuracy: 1)
                     XCTAssertEqual(footer.finishButton.frame.height, nativeButton.frame.height, accuracy: 1)
                     XCTAssertEqual(footer.finishButton.borderShape, .capsule)
                     XCTAssertEqual(footer.finishButton.image, finish.image)

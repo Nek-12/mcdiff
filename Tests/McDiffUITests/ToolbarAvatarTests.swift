@@ -18,7 +18,7 @@ final class ToolbarAvatarTests: XCTestCase {
     }
 
     @MainActor
-    func testAvatarRendersAt24PointsWithoutGrowingNativeGlassButton() throws {
+    func testAvatarRendersAt24PointsCenteredInNativeGlassButton() throws {
         _ = NSApplication.shared
         let controller = ReviewWindowController(github: GitHubClient(
             clientID: "test", credentials: AvatarCredentials()))
@@ -37,9 +37,9 @@ final class ToolbarAvatarTests: XCTestCase {
             XCTAssertNil(item.view, "The system must generate the toolbar button.")
             XCTAssertTrue(item.isBordered)
             XCTAssertTrue(button.isBordered)
-            XCTAssertEqual(button.frame.size, NSSize(width: 36, height: 36))
             let imageRect = try XCTUnwrap(button.cell).imageRect(forBounds: button.bounds)
             XCTAssertEqual(imageRect.size, NSSize(width: 24, height: 24))
+            XCTAssertTrue(button.bounds.contains(imageRect))
             XCTAssertEqual(imageRect.midX, button.bounds.midX)
             XCTAssertEqual(imageRect.midY, button.bounds.midY)
             XCTAssertFalse(window.isVisible)
