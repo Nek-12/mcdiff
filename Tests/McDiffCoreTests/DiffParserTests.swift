@@ -50,7 +50,7 @@ final class DiffParserTests: XCTestCase {
         XCTAssertTrue(a.isBinary)
         XCTAssertNotEqual(a.fingerprint, b.fingerprint)
         let mode = try XCTUnwrap(DiffParser.parse("diff --git a/x b/x\nold mode 100644\nnew mode 100755\n").first)
-        XCTAssertFalse(mode.isFormattingOnly)
+        XCTAssertFalse(mode.isWhitespaceAndImportsOnly)
         XCTAssertTrue(mode.hasMetadataChanges)
         XCTAssertNotEqual(a.fingerprint, mode.fingerprint)
     }
@@ -66,15 +66,16 @@ final class DiffParserTests: XCTestCase {
         XCTAssertEqual(try DiffParser.parse("").count, 0)
     }
 
-    func testFormattingSafety() throws {
+    func testPatchParsingDoesNotGuessFullSourceIgnoreStatus() throws {
         func file(_ path: String, _ old: String, _ new: String) throws -> FileDiff {
             try XCTUnwrap(DiffParser.parse("diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n@@ -1 +1 @@\n-\(old)\n+\(new)\n").first)
         }
-        XCTAssertTrue(try file("data.json", #"{"x": 1}"#, #"{ "x" : 1 }"#).isFormattingOnly)
-        XCTAssertFalse(try file("data.json", #"{"x": "a b"}"#, #"{"x": "ab"}"#).isFormattingOnly)
-        XCTAssertFalse(try file("x.py", "  return 1", "    return 1").isFormattingOnly)
-        XCTAssertFalse(try file("x.kt", #"val x = "a b""#, #"val x = "ab""#).isFormattingOnly)
-        XCTAssertFalse(try file("x.md", "one", "one  ").isFormattingOnly)
+        // Parsing a patch cannot know whether its lines are inside a multiline literal.
+        XCTAssertFalse(try file("data.json", #"{"x": 1}"#, #"{ "x" : 1 }"#).isWhitespaceAndImportsOnly)
+        XCTAssertFalse(try file("data.json", #"{"x": "a b"}"#, #"{"x": "ab"}"#).isWhitespaceAndImportsOnly)
+        XCTAssertFalse(try file("x.py", "  return 1", "    return 1").isWhitespaceAndImportsOnly)
+        XCTAssertFalse(try file("x.kt", #"val x = "a b""#, #"val x = "ab""#).isWhitespaceAndImportsOnly)
+        XCTAssertFalse(try file("x.md", "one", "one  ").isWhitespaceAndImportsOnly)
     }
 
     func testStress400Files30000ChangedLines() throws {

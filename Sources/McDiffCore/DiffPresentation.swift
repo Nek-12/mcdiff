@@ -18,6 +18,103 @@ public enum DiffPresentation {
         "kt", "kts", "java", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "pyi"
     ]
 
+    /// Single-line import grammars permit cheap rejection before reading blobs.
+    /// This is only a prefilter: quoted fragments still need full-source validation.
+    static func mayBeWhitespaceAndImportsOnly(_ file: FileDiff) -> Bool {
+        let ext = (file.path as NSString).pathExtension.lowercased()
+        if importExtensions.contains(ext) && !["kt", "kts", "java"].contains(ext) { return true }
+        func significant(_ lines: [DiffLine], side: DiffSide) -> String {
+            lines.filter { importLineNumbers([$0], ext: ext, side: side).isEmpty }
+                .map { $0.text.filter { !$0.isWhitespace } }.joined()
+        }
+        return file.hunks.allSatisfy { hunk in
+            let old = hunk.lines.filter { $0.kind == .deletion }
+            let new = hunk.lines.filter { $0.kind == .addition }
+            let whitespaceOnly = old.map { $0.text.filter { !$0.isWhitespace } }.joined() ==
+                new.map { $0.text.filter { !$0.isWhitespace } }.joined()
+            return whitespaceOnly || significant(old, side: .old) == significant(new, side: .new)
+        }
+    }
+
+    static func mayHaveWhitespaceLines(_ file: FileDiff) -> Bool {
+        for hunk in file.hunks {
+            var old: [String: String] = [:]
+            for line in hunk.lines where line.kind == .deletion {
+                let key = line.text.filter { !$0.isWhitespace }
+                if key.isEmpty { return true }
+                if let previous = old[key], !previous.utf8.elementsEqual(line.text.utf8) { return true }
+                old[key] = line.text
+            }
+            for line in hunk.lines where line.kind == .addition {
+                let key = line.text.filter { !$0.isWhitespace }
+                if key.isEmpty { return true }
+                if let previous = old[key], !previous.utf8.elementsEqual(line.text.utf8) { return true }
+            }
+        }
+        return false
+    }
+
+    /// Presentation-only projection. Raw lines, side texts, counts and review
+    /// identity stay unchanged; neutral counterparts share both original numbers.
+    public static func ignoringWhitespace(in pairs: [DiffPair], file: FileDiff) -> [DiffPair] {
+        guard !file.whitespaceChanges.isEmpty else { return pairs }
+        let matches = file.whitespaceChanges.pairsByOld
+        let blankOld = file.whitespaceChanges.oldBlankLines
+        let blankNew = file.whitespaceChanges.newBlankLines
+        let pairedNew = file.whitespaceChanges.pairedNewLines
+        var result: [DiffPair] = []
+        func neutral(_ old: DiffLine?, _ new: DiffLine?) -> DiffPair {
+            let oldNumber = old?.oldNumber, newNumber = new?.newNumber
+            return DiffPair(
+                old: old.map { .init(kind: .context, text: $0.text, oldNumber: oldNumber, newNumber: newNumber) },
+                new: new.map { .init(kind: .context, text: $0.text, oldNumber: oldNumber, newNumber: newNumber) })
+        }
+        func project() {
+            let old = pairs.compactMap(\.old), new = pairs.compactMap(\.new)
+            let newIndices = Dictionary(uniqueKeysWithValues: new.enumerated().compactMap { index, line -> (Int, Int)? in
+                line.newNumber.map { ($0, index) }
+            })
+            let anchors = old.enumerated().compactMap { index, line -> (old: Int, new: Int)? in
+                guard let oldNumber = line.oldNumber else { return nil }
+                let newNumber: Int?
+                if let matched = matches[oldNumber] {
+                    newNumber = matched
+                } else if line.kind == .context, !blankOld.contains(oldNumber),
+                          let counterpart = line.newNumber, !pairedNew.contains(counterpart), !blankNew.contains(counterpart) {
+                    newNumber = counterpart
+                } else {
+                    newNumber = nil
+                }
+                guard let newNumber, let newIndex = newIndices[newNumber] else { return nil }
+                return (index, newIndex)
+            }
+            var oldIndex = 0, newIndex = 0
+            for anchor in anchors + [(old.count, new.count)] {
+                while oldIndex < anchor.old || newIndex < anchor.new {
+                    let lhs = oldIndex < anchor.old ? old[oldIndex] : nil
+                    let rhs = newIndex < anchor.new ? new[newIndex] : nil
+                    let leftBlank = lhs?.oldNumber.map(blankOld.contains) == true
+                    let rightBlank = rhs?.newNumber.map(blankNew.contains) == true
+                    if leftBlank || rightBlank {
+                        result.append(neutral(leftBlank ? lhs : nil, rightBlank ? rhs : nil))
+                        if leftBlank { oldIndex += 1 }
+                        if rightBlank { newIndex += 1 }
+                    } else {
+                        result.append(DiffPair(old: lhs, new: rhs))
+                        if lhs != nil { oldIndex += 1 }
+                        if rhs != nil { newIndex += 1 }
+                    }
+                }
+                if anchor.old < old.count && anchor.new < new.count {
+                    result.append(neutral(old[anchor.old], new[anchor.new]))
+                }
+                oldIndex = anchor.old + 1; newIndex = anchor.new + 1
+            }
+        }
+        project()
+        return result
+    }
+
     /// Keeps the paired counterpart for word emphasis while ordering each
     /// contiguous edit as deletions followed by additions in a unified view.
     public static func sourceRows(_ pairs: [DiffPair], layout: DiffLayout) -> [(pair: DiffPair, side: DiffSide?)] {
@@ -168,64 +265,27 @@ public enum DiffPresentation {
 
     private static func sourceImportNumbers(_ source: String, file: FileDiff, ext: String, side: DiffSide) -> Set<Int> {
         guard importExtensions.contains(ext) else { return [] }
-        let texts = source.components(separatedBy: "\n")
+        let scan = SourceLexing(source, ext: ext)
+        let texts = scan.lines
         // The working file can change after Git produced the patch. Never fold
         // lines using source context from a different version of that file.
         guard file.hunks.flatMap(\.lines).allSatisfy({ line in
             guard let number = side == .old ? line.oldNumber : line.newNumber else { return true }
             return number > 0 && number <= texts.count && texts[number - 1] == line.text
         }) else { return [] }
-        let lines = texts.enumerated().map {
+        return sourceImportNumbers(scan, ext: ext, side: side)
+    }
+
+    static func sourceImportNumbers(_ scan: SourceLexing, ext: String, side: DiffSide = .new) -> Set<Int> {
+        guard importExtensions.contains(ext) else { return [] }
+        let lines = scan.lines.enumerated().map {
             DiffLine(kind: .context, text: $0.element, oldNumber: $0.offset + 1, newNumber: $0.offset + 1)
         }
         // Scan from the start of the file so a hunk inside a string/comment
         // cannot masquerade as imports. Unsafe lines also separate import runs.
         var numbers: Set<Int> = [], segment: [DiffLine] = []
-        var delimiter: String?
-        var blockDepth = 0
-        var quote: Character?
-        var escaped = false
-        for line in lines {
-            var safe = delimiter == nil && quote == nil
-            let text = line.text
-            var index = text.startIndex
-            while index < text.endIndex {
-                let rest = text[index...], character = text[index]
-                if let active = delimiter {
-                    safe = false
-                    if active == "*/" && rest.hasPrefix("/*") {
-                        blockDepth += 1
-                        index = text.index(index, offsetBy: 2)
-                    } else if rest.hasPrefix(active) && !escaped {
-                        if active == "*/" { blockDepth -= 1 }
-                        if blockDepth == 0 { delimiter = nil }
-                        index = text.index(index, offsetBy: active.count)
-                    } else {
-                        escaped = active != "*/" && !(active == "`" && ext == "go") && character == "\\" && !escaped
-                        index = text.index(after: index)
-                    }
-                } else if let active = quote {
-                    if character == active && !escaped { quote = nil }
-                    escaped = character == "\\" && !escaped
-                    index = text.index(after: index)
-                } else if rest.hasPrefix("//") || (["py", "pyi"].contains(ext) && character == "#") {
-                    safe = false
-                    break
-                } else if rest.hasPrefix("/*") {
-                    safe = false; delimiter = "*/"; blockDepth = 1
-                    index = text.index(index, offsetBy: 2)
-                } else if rest.hasPrefix("\"\"\"") || rest.hasPrefix("'''") || character == "`" {
-                    safe = false
-                    delimiter = character == "`" ? "`" : String(repeating: character, count: 3)
-                    index = text.index(index, offsetBy: delimiter!.count)
-                } else {
-                    if character == "\"" || character == "'" { quote = character }
-                    index = text.index(after: index)
-                }
-            }
-            if quote != nil { safe = false }
-            escaped = false
-            if safe { segment.append(line) }
+        for (index, line) in lines.enumerated() {
+            if scan.importSafe[index] { segment.append(line) }
             else {
                 numbers.formUnion(importLineNumbers(segment, ext: ext, side: side))
                 segment.removeAll(keepingCapacity: true)
@@ -250,10 +310,10 @@ public enum DiffPresentation {
                 switch ext {
                 case "kt", "kts":
                     return matches(s, #"^package\s+[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*;?$"#) ||
-                        matches(s, #"^import [\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}\p{N}_]+)*(?:\.\*)?(?: as [\p{L}_][\p{L}\p{N}_]*)?;?$"#)
+                        matches(s, #"^import\s+[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}\p{N}_]+)*(?:\.\*)?(?:\s+as\s+[\p{L}_][\p{L}\p{N}_]*)?;?$"#)
                 case "java":
                     return matches(s, #"^package\s+[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}_$][\p{L}\p{N}_$]*)*;$"#) ||
-                        matches(s, #"^import (?:static )?[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}\p{N}_$]+)*(?:\.\*)?;$"#)
+                        matches(s, #"^import\s+(?:static\s+)?[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}\p{N}_$]+)*(?:\.\*)?;$"#)
                 case "go":
                     return matches(s, #"^package\s+[\p{L}_][\p{L}\p{N}_]*;?$"#) ||
                         matches(s, #"^import\s+(?:(?:[\p{L}_][\p{L}\p{N}_]*|\.)\s+)?"[^"\n]+"\s*$"#) ||
@@ -268,10 +328,10 @@ public enum DiffPresentation {
                     return matches(s, #"^import\s+(?:(?:type\s+)?[\p{L}\p{N}_$*,{}\s]+\s+from\s+)?(?:"[^"\n]+"|'[^'\n]+')\s*;?$"#) && balanced(s)
                 }
             }
-            let prefix = statement.hasPrefix("import ") || statement == "import(" || statement == "import (" ||
-                (["kt", "kts", "java", "go"].contains(ext) && matches(statement, #"^package\s"#)) ||
-                (["py", "pyi"].contains(ext) && statement.hasPrefix("from ")) ||
-                (ext == "rs" && (statement.hasPrefix("use ") || statement.hasPrefix("pub use ") || statement.hasPrefix("pub(")))
+            let prefix = (statement.hasPrefix("import") && matches(statement, #"^import(?:\s|\()"#)) ||
+                (["kt", "kts", "java", "go"].contains(ext) && statement.hasPrefix("package") && matches(statement, #"^package\s"#)) ||
+                (["py", "pyi"].contains(ext) && statement.hasPrefix("from") && matches(statement, #"^from\s"#)) ||
+                (ext == "rs" && (statement.hasPrefix("use") || statement.hasPrefix("pub")))
             if prefix {
                 // Only continue a statement that explicitly opens an import list.
                 if !complete(statement) && (statement.contains("{") || statement.contains("(")) {

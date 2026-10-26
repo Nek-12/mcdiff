@@ -20,6 +20,12 @@ final class ReviewCheckboxTests: XCTestCase {
     }
 
     @MainActor
+    private func footerText(_ viewport: DiffViewport) throws -> String {
+        let footer = try XCTUnwrap(viewport.table.view(atColumn: 0, row: viewport.rows.count - 1, makeIfNecessary: true))
+        return try XCTUnwrap(descendants(footer).compactMap { $0 as? NSTextField }.first?.stringValue)
+    }
+
+    @MainActor
     func testBothCheckboxesPersistReviewStateAndChangeExpansionWithoutMovingHeader() async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -43,7 +49,7 @@ final class ReviewCheckboxTests: XCTestCase {
         let controller = ReviewWindowController(github: GitHubClient(clientID: "test", credentials: NoCredentials()))
         controller.start(store: store, arguments: ["--repo", directory.path])
         for _ in 0..<400 {
-            if controller.screen == .review { break }
+            if controller.isReviewReady { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(controller.screen, .review)
@@ -53,6 +59,8 @@ final class ReviewCheckboxTests: XCTestCase {
         content.layoutSubtreeIfNeeded()
         let viewport = try XCTUnwrap(descendants(content).compactMap { $0 as? DiffViewport }.first)
         try await ready(viewport)
+        XCTAssertEqual(try footerText(viewport), "2 files left to review")
+        XCTAssertTrue(viewport.finishReviewEnabled)
         let sidebar = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }
             .first { $0.tableColumns.first?.identifier.rawValue == "path" })
         viewport.navigate(to: 1)
@@ -78,6 +86,7 @@ final class ReviewCheckboxTests: XCTestCase {
                 button.performClick(nil)
                 try await ready(viewport)
                 XCTAssertEqual(viewport.isReviewed(viewport.files[1]), reviewed)
+                XCTAssertEqual(try footerText(viewport), reviewed ? "1 file left to review" : "2 files left to review")
                 XCTAssertEqual(viewport.expanded.contains(path), !reviewed)
                 XCTAssertEqual(sidebarCheck.state == .on, reviewed)
                 let refreshed = try XCTUnwrap(viewport.table.view(atColumn: 0, row: header, makeIfNecessary: true))
@@ -95,6 +104,7 @@ final class ReviewCheckboxTests: XCTestCase {
         try Data("not a directory".utf8).write(to: storage)
         sidebarCheck.performClick(nil)
         XCTAssertFalse(viewport.isReviewed(viewport.files[1]))
+        XCTAssertEqual(try footerText(viewport), "2 files left to review")
         XCTAssertTrue(viewport.expanded.contains(path))
         XCTAssertEqual(sidebarCheck.state, .off)
         let failedHeader = try XCTUnwrap(viewport.table.view(atColumn: 0, row: header, makeIfNecessary: true))
@@ -109,6 +119,7 @@ final class ReviewCheckboxTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(sidebar.numberOfRows, 1)
+        XCTAssertEqual(try footerText(viewport), "2 files left to review")
         let filteredCell = try XCTUnwrap(sidebar.view(atColumn: 0, row: 0, makeIfNecessary: true))
         XCTAssertEqual(filteredCell.toolTip, "wearOsMain/…/auth.kt")
     }

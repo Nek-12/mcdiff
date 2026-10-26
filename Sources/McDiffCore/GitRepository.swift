@@ -43,10 +43,18 @@ public struct GitRepository: Sendable {
         let requestedBase = try repository.revision(request.base)
         let target = try request.target.map { try repository.revision($0) }
         let base: String
+        let warning: ComparisonWarning?
         if request.mergeBase {
             let head = try target ?? repository.revision("HEAD")
-            base = try repository.git(["merge-base", requestedBase, head]).text.trimmingCharacters(in: .newlines)
-        } else { base = requestedBase }
+            let ancestors = try repository.git(["merge-base", "--all", requestedBase, head])
+                .text.split(separator: "\n").map(String.init)
+            guard let selected = ancestors.first else { throw GitError("Git returned no common ancestor for this comparison.") }
+            base = selected
+            warning = ancestors.count > 1 ? .multipleMergeBases(alternatives: Array(ancestors.dropFirst())) : nil
+        } else {
+            base = requestedBase
+            warning = nil
+        }
         let options = ["--patch", "--full-index", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--find-renames",
                        "--submodule=short", "--ignore-submodules=none"]
@@ -61,12 +69,8 @@ public struct GitRepository: Sendable {
                 files.append(try repository.untrackedFile(filePath))
             }
         }
-        files = try repository.classifyFormatting(files, base: base, target: target)
-        files.sort {
-            let lhs = $0.category == .production && !$0.isRemovalOnly && !$0.isFormattingOnly
-            let rhs = $1.category == .production && !$1.isRemovalOnly && !$1.isFormattingOnly
-            return lhs == rhs ? $0.path < $1.path : lhs
-        }
+        files = try repository.classifyWhitespaceAndImports(files, base: base)
+        files.sort { $0.path < $1.path }
         let canonical = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
         let identityFields = request.pullRequestURL.map { [canonical, $0] } ??
             [canonical, request.base, request.target ?? "<worktree>", request.mergeBase ? "merge-base" : "direct"]
@@ -78,7 +82,7 @@ public struct GitRepository: Sendable {
         } else { title = "\(request.base) → \(request.target ?? "Working tree")" }
         return ReviewSnapshot(request: request, identity: identity,
                               title: title,
-                              baseRevision: base, targetRevision: target, files: files)
+                              baseRevision: base, targetRevision: target, files: files, warning: warning)
     }
 
     public func content(snapshot: ReviewSnapshot, file: FileDiff, side: DiffSide) throws -> String {
@@ -127,6 +131,35 @@ public struct GitRepository: Sendable {
             throw GitError("This file has no unchanged sections in the loaded review. Refresh the comparison.")
         }
         let oldSource = try content(snapshot: snapshot, file: file, side: .old)
+        let sources = try canonicalSources(file: file, oldSource: oldSource)
+        let expected = sources.newSource
+        let stale = GitError("The file changed since this review was loaded. Refresh the comparison before showing unchanged lines.")
+        if snapshot.targetRevision == nil {
+            let root = String(try git(["rev-parse", "--show-toplevel"]).text.dropLast())
+            let repository = GitRepository(path: root)
+            let relative = try contentPath(file: file, side: .new)
+            let entry = try workingEntry(path: relative, root: root)
+            let actualHash: String
+            if entry.type == .typeSymbolicLink {
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: entry.url.path)
+                actualHash = try repository.git(["hash-object", "--no-filters", "--stdin"], input: Data(target.utf8)).text
+            } else {
+                actualHash = try repository.git(["hash-object", "--", relative]).text
+            }
+            // Without -w, hash-object neither writes an object nor touches the index.
+            let expectedHash = try repository.git(["hash-object", "--no-filters", "--stdin"], input: Data(expected.utf8)).text
+            guard actualHash == expectedHash else { throw stale }
+        } else {
+            let actual = try content(snapshot: snapshot, file: file, side: .new)
+            guard actual.utf8.elementsEqual(expected.utf8) else { throw stale }
+        }
+        return sources
+    }
+
+    /// Git's canonical new content is determined by the immutable base and patch,
+    /// including clean filters and final-newline changes. No live read is needed.
+    private func canonicalSources(file: FileDiff, oldSource: String) throws
+        -> (old: [String], oldSource: String, newSource: String) {
         guard !oldSource.utf8.prefix(8000).contains(0) else {
             throw GitError("This file contains binary data and has no unchanged text to display.")
         }
@@ -163,25 +196,6 @@ public struct GitRepository: Sendable {
             oldEnd = oldRange.upperBound
         }
         appendOld(oldEnd..<old.count)
-        if snapshot.targetRevision == nil {
-            let root = String(try git(["rev-parse", "--show-toplevel"]).text.dropLast())
-            let repository = GitRepository(path: root)
-            let relative = try contentPath(file: file, side: .new)
-            let entry = try workingEntry(path: relative, root: root)
-            let actualHash: String
-            if entry.type == .typeSymbolicLink {
-                let target = try FileManager.default.destinationOfSymbolicLink(atPath: entry.url.path)
-                actualHash = try repository.git(["hash-object", "--no-filters", "--stdin"], input: Data(target.utf8)).text
-            } else {
-                actualHash = try repository.git(["hash-object", "--", relative]).text
-            }
-            // Without -w, hash-object neither writes an object nor touches the index.
-            let expectedHash = try repository.git(["hash-object", "--no-filters", "--stdin"], input: Data(expected.utf8)).text
-            guard actualHash == expectedHash else { throw stale }
-        } else {
-            let actual = try content(snapshot: snapshot, file: file, side: .new)
-            guard actual.utf8.elementsEqual(expected.utf8) else { throw stale }
-        }
         return (old, oldSource, expected)
     }
 
@@ -242,44 +256,42 @@ public struct GitRepository: Sendable {
             let lines = texts.enumerated().map {
                 DiffLine(kind: .addition, text: $0.element, oldNumber: nil, newNumber: $0.offset + 1)
             }
-            hunks = [DiffHunk(header: "@@ -0,0 +1,\(lines.count) @@", lines: lines)]
+            hunks = [DiffHunk(header: "@@ -0,0 +1,\(lines.count) @@", lines: lines,
+                             oldRange: 0..<0, newRange: 0..<lines.count,
+                             noFinalNewlineSides: data.last == 10 ? [] : [.new])]
         }
         return FileDiff(path: relative, status: "A", hunks: hunks, isBinary: binary,
                         fingerprint: fingerprint, category: FileClassifier.classify(relative),
                         hasMetadataChanges: true)
     }
 
-    private func classifyFormatting(_ files: [FileDiff], base: String, target: String?) throws -> [FileDiff] {
+    private func classifyWhitespaceAndImports(_ files: [FileDiff], base: String) throws -> [FileDiff] {
         let candidates = files.indices.filter { index in
             let file = files[index]
-            guard file.status == "M", !file.isBinary, !file.isGitlink, !file.isFormattingOnly, !file.hasMetadataChanges,
-                  !file.hunks.isEmpty, FileClassifier.supportsFormattingComparison(path: file.path) else { return false }
-            // Cheap prefilter before retrieving complete blobs; lexical safety is checked below.
-            return file.hunks.allSatisfy { hunk in
-                let old = hunk.lines.filter { $0.kind == .deletion }.flatMap { $0.text.filter { !$0.isWhitespace } }
-                let new = hunk.lines.filter { $0.kind == .addition }.flatMap { $0.text.filter { !$0.isWhitespace } }
-                return old == new
-            }
+            guard !file.isBinary, !file.isGitlink,
+                  !file.hunks.isEmpty, FileClassifier.supportsWhitespaceAndImportsComparison(path: file.path) else { return false }
+            let wholeFileCandidate = file.status == "M" && !file.hasMetadataChanges &&
+                DiffPresentation.mayBeWhitespaceAndImportsOnly(file)
+            return wholeFileCandidate || DiffPresentation.mayHaveWhitespaceLines(file)
         }
-        let oldContents = try blobContents(candidates.map { "\(base):\(files[$0].oldPath)" })
-        let newContents: [String]
-        if let target { newContents = try blobContents(candidates.map { "\(target):\(files[$0].path)" }) }
-        else { newContents = try candidates.map { try workingContent(path: files[$0].path, root: path) } }
         var result = files
-        for (position, index) in candidates.enumerated() {
-            let file = files[index], new = newContents[position]
-            // A live worktree may change while loading. Never classify a different version
-            // than the one whose changed lines are shown in this snapshot.
-            let newLines = new.components(separatedBy: "\n")
-            let matches = file.hunks.flatMap(\.lines).allSatisfy { line in
-                guard let number = line.newNumber else { return true }
-                return number > 0 && number <= newLines.count && newLines[number - 1] == line.text
+        // Bound the simultaneous full-source working set, including cat-file output.
+        for start in stride(from: 0, to: candidates.count, by: 16) {
+            let batch = Array(candidates[start..<min(start + 16, candidates.count)])
+            let existing = batch.filter { files[$0].status != "A" }
+            let contents = try blobContents(existing.map { "\(base):\(files[$0].oldPath)" })
+            let oldContents = Dictionary(uniqueKeysWithValues: zip(existing, contents))
+            for index in batch {
+                let file = files[index]
+                let old = file.status == "A" ? "" : oldContents[index]!
+                let new = try canonicalSources(file: file, oldSource: old).newSource
+                let ignored = FileClassifier.ignoredChanges(file: file, oldContent: old, newContent: new)
+                guard ignored.wholeFile || !ignored.lines.isEmpty else { continue }
+                result[index] = FileDiff(path: file.path, oldPath: file.oldPath, status: file.status,
+                    hunks: file.hunks, isBinary: file.isBinary, fingerprint: file.fingerprint,
+                    category: file.category, isWhitespaceAndImportsOnly: ignored.wholeFile, hasMetadataChanges: file.hasMetadataChanges,
+                    isGitlink: file.isGitlink, whitespaceChanges: ignored.lines)
             }
-            guard matches, FileClassifier.isFormattingOnly(path: file.path, oldContent: oldContents[position], newContent: new) else { continue }
-            result[index] = FileDiff(path: file.path, oldPath: file.oldPath, status: file.status,
-                hunks: file.hunks, isBinary: file.isBinary, fingerprint: file.fingerprint,
-                category: file.category, isFormattingOnly: true, hasMetadataChanges: file.hasMetadataChanges,
-                isGitlink: file.isGitlink)
         }
         return result
     }

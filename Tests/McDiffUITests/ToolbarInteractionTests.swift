@@ -51,7 +51,7 @@ final class ToolbarInteractionTests: XCTestCase {
             if controller.screen == .review { controller.showHome() }
             controller.start(store: store, arguments: ["--repo", directory.path])
             for _ in 0..<400 {
-                if controller.screen == .review { break }
+                if controller.isReviewReady { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTAssertEqual(controller.screen, .review)
@@ -62,7 +62,9 @@ final class ToolbarInteractionTests: XCTestCase {
                     split.setPosition(width, ofDividerAt: separator.dividerIndex)
                     chrome.layoutSubtreeIfNeeded()
                     let refresh = try XCTUnwrap(descendants(of: chrome).first { $0.toolTip == "Refresh comparison (⌘R)" })
-                    let home = try XCTUnwrap(descendants(of: chrome).first { $0.toolTip == "Home" })
+                    let home = try XCTUnwrap(descendants(of: chrome).first {
+                        $0.toolTip == "Home" && !$0.isDescendant(of: window.contentView!)
+                    })
                     let sidebar = split.subviews[separator.dividerIndex]
                     let edge = chrome.convert(sidebar.bounds, from: sidebar).maxX
                     let refreshFrame = chrome.convert(refresh.bounds, from: refresh)
@@ -74,6 +76,27 @@ final class ToolbarInteractionTests: XCTestCase {
             let finish = try XCTUnwrap(toolbar.items.last)
             XCTAssertEqual(finish.label, "Finish review")
             XCTAssertEqual(finish.style, .prominent)
+            if count == 2 {
+                let chrome = try XCTUnwrap(window.contentView?.superview)
+                let nativeFinish = try XCTUnwrap(descendants(of: chrome).first {
+                    $0.toolTip == "Finish review" && !$0.isDescendant(of: window.contentView!)
+                })
+                // The tooltip belongs to the toolbar item wrapper, which also includes
+                // vertical hit padding. Compare against its rendered button content.
+                let nativeButton = try XCTUnwrap(nativeFinish.subviews.first)
+                let viewport = try XCTUnwrap(descendants(of: chrome).compactMap { $0 as? DiffViewport }.first)
+                let footer = try XCTUnwrap(viewport.table.view(atColumn: 0, row: viewport.rows.count - 1,
+                                                               makeIfNecessary: true) as? ReviewFooterView)
+                for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                    window.appearance = NSAppearance(named: appearance)
+                    chrome.layoutSubtreeIfNeeded()
+                    footer.layoutSubtreeIfNeeded()
+                    XCTAssertEqual(footer.finishButton.frame.width, nativeButton.frame.width, accuracy: 1)
+                    XCTAssertEqual(footer.finishButton.frame.height, nativeButton.frame.height, accuracy: 1)
+                    XCTAssertEqual(footer.finishButton.borderShape, .capsule)
+                    XCTAssertEqual(footer.finishButton.image, finish.image)
+                }
+            }
             let navigation = try XCTUnwrap(toolbar.items.compactMap { $0 as? NSToolbarItemGroup }.first {
                 $0.subitems.first?.label == "Comments"
             })
@@ -126,7 +149,7 @@ final class ToolbarInteractionTests: XCTestCase {
     @MainActor
     func testLayoutToggleShowsDestinationAndUpdatesViewport() throws {
         _ = NSApplication.shared
-        let controller = ReviewWindowController()
+        let controller = ReviewWindowController(github: testGitHubClient())
         let window = try XCTUnwrap(controller.window)
         let toolbar = try XCTUnwrap(window.toolbar)
         let items = controller.toolbarAllowedItemIdentifiers(toolbar).compactMap {
@@ -151,7 +174,7 @@ final class ToolbarInteractionTests: XCTestCase {
     @MainActor
     func testToolbarActionsHaveReadableTooltips() throws {
         _ = NSApplication.shared
-        let controller = ReviewWindowController()
+        let controller = ReviewWindowController(github: testGitHubClient())
         let toolbar = try XCTUnwrap(controller.window?.toolbar)
         for identifier in controller.toolbarAllowedItemIdentifiers(toolbar) {
             guard let item = controller.toolbar(toolbar, itemForItemIdentifier: identifier,

@@ -36,6 +36,7 @@ final class GitRepositoryTests: XCTestCase {
         try write("skip.ignored", "hidden\n")
         let index = try Data(contentsOf: root.appendingPathComponent(".git/index"))
         let snapshot = try load()
+        XCTAssertNil(snapshot.warning)
         XCTAssertEqual(Set(snapshot.files.map(\.path)), ["committed.swift", "staged.swift", "tracked.swift", "new \"odd\"\t😀\n.swift"])
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), index)
         XCTAssertEqual(snapshot.targetRevision, nil)
@@ -510,6 +511,7 @@ final class GitRepositoryTests: XCTestCase {
         _ = try repo.git(["commit", "-m", "main"])
         let snapshot = try load(target: "feature")
         XCTAssertEqual(snapshot.files.map(\.path), ["feature.swift"])
+        XCTAssertNil(snapshot.warning)
     }
 
     func testPullRequestDiffExcludesLaterBaseChangesEvenWithConflictsAndDirtyUnrelatedCheckout() throws {
@@ -565,6 +567,93 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), index)
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("tracked.swift"), encoding: .utf8),
                        "local unstaged edit\n")
+    }
+
+    func testStackedPullRequestUsesItsNonDefaultTargetWithoutIncludingParentChanges() throws {
+        _ = try repo.git(["checkout", "-b", "parent"])
+        try write("parent.swift", "parent feature\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "parent feature"])
+        let ancestor = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "-b", "child"])
+        try write("child.swift", "child feature\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "child feature"])
+        let head = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "parent"])
+        try write("parent-later.swift", "later parent change\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "advance parent"])
+        let base = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "main"])
+        try write("local.swift", "unrelated working change\n")
+        _ = try repo.git(["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        let refs = try repo.git(["show-ref"]).data
+        let status = try repo.git(["status", "--porcelain=v1", "-z"]).data
+        let index = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+
+        let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/124")
+        let request = try pr.resolve(localRepository: root.path,
+                                    revisions: GitHubPRRevisions(base: base, head: head, title: "Child feature"))
+        let snapshot = try repo.load(request)
+        XCTAssertEqual(snapshot.baseRevision, ancestor)
+        XCTAssertEqual(snapshot.targetRevision, head)
+        XCTAssertEqual(snapshot.files.map(\.path), ["child.swift"])
+        XCTAssertNil(snapshot.warning)
+        XCTAssertEqual(snapshot.files.reduce(0) { $0 + $1.additions }, 1)
+        XCTAssertEqual(snapshot.files.reduce(0) { $0 + $1.deletions }, 0)
+        XCTAssertEqual(try load(base: "main", target: head).files.map(\.path), ["child.swift", "parent.swift"])
+        XCTAssertEqual(try repo.git(["show-ref"]).data, refs)
+        XCTAssertEqual(try repo.git(["status", "--porcelain=v1", "-z"]).data, status)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), index)
+    }
+
+    func testCrissCrossStackedPullRequestWarnsWithoutChangingGitsChosenDiff() throws {
+        _ = try repo.git(["checkout", "-b", "parent"])
+        try write("parent.swift", "parent feature\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "parent feature"])
+        let parentAncestor = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "main"])
+        try write("main.swift", "main feature\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "advance main"])
+        let mainAncestor = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "parent"])
+        _ = try repo.git(["merge", "--no-ff", "-m", "parent merges main", mainAncestor])
+        let base = try repo.revision("HEAD")
+        _ = try repo.git(["checkout", "-b", "child", mainAncestor])
+        _ = try repo.git(["merge", "--no-ff", "-m", "child merges earlier parent", parentAncestor])
+        try write("child.swift", "child feature\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "child feature"])
+        let head = try repo.revision("HEAD")
+        _ = try repo.git(["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        let selected = try repo.git(["merge-base", base, head]).text.trimmingCharacters(in: .newlines)
+        let pr = try GitHubPR.parse("https://github.com/owner/repo/pull/125")
+        let request = try pr.resolve(localRepository: root.path,
+                                    revisions: GitHubPRRevisions(base: base, head: head, title: "Child feature"))
+        let refs = try repo.git(["show-ref"]).data
+        let status = try repo.git(["status", "--porcelain=v1", "-z"]).data
+        let index = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+        let snapshot = try repo.load(request)
+        XCTAssertEqual(snapshot.baseRevision, selected)
+        guard case .multipleMergeBases(let alternatives) = snapshot.warning else {
+            return XCTFail("Criss-cross ancestry must explain its ambiguous comparison base.")
+        }
+        XCTAssertEqual(Set([snapshot.baseRevision] + alternatives), Set([parentAncestor, mainAncestor]))
+        XCTAssertEqual(alternatives.count, 1)
+        XCTAssertEqual(snapshot.files.map(\.path),
+                       selected == parentAncestor ? ["child.swift", "main.swift"] : ["child.swift", "parent.swift"])
+        XCTAssertEqual(try load(base: "parent", target: "child").warning, snapshot.warning)
+        XCTAssertEqual(try load(base: "parent").warning, snapshot.warning)
+        let direct = try load(base: "parent", target: "child", mergeBase: false)
+        XCTAssertNil(direct.warning)
+        XCTAssertEqual(direct.baseRevision, base)
+        XCTAssertEqual(direct.files.map(\.path), ["child.swift"])
+        XCTAssertEqual(try repo.git(["show-ref"]).data, refs)
+        XCTAssertEqual(try repo.git(["status", "--porcelain=v1", "-z"]).data, status)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), index)
     }
 
     func testRenameDeletionModeAndBinaryChanges() throws {
@@ -629,7 +718,7 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertTrue(try load().files.contains { $0.path == "tracked.swift" })
     }
 
-    func testFormattingClassificationUsesWholeFilesAndPreservesSemanticWhitespaceAndModes() throws {
+    func testIgnoreClassificationUsesWholeSourcesAndPreservesStringChangesAndModes() throws {
         let initial: [String: String] = [
             "Odd \"path\"\t\n.kt": "fun example() {\nval value = 1\n}\n",
             "literal.kt": "val text = \"two words\"\n",
@@ -647,14 +736,212 @@ final class GitRepositoryTests: XCTestCase {
         try write("mode.kt", "val  value = 1\n")
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("mode.kt").path)
         let snapshot = try load()
-        XCTAssertEqual(snapshot.files.first { $0.path == "Odd \"path\"\t\n.kt" }?.isFormattingOnly, true)
-        for name in ["literal.kt", "raw.kt", "indent.py", "mode.kt"] {
-            XCTAssertEqual(snapshot.files.first { $0.path == name }?.isFormattingOnly, false, name)
+        XCTAssertEqual(snapshot.files.first { $0.path == "Odd \"path\"\t\n.kt" }?.isWhitespaceAndImportsOnly, true)
+        XCTAssertEqual(snapshot.files.first { $0.path == "indent.py" }?.isWhitespaceAndImportsOnly, true)
+        for name in ["literal.kt", "raw.kt", "mode.kt"] {
+            XCTAssertEqual(snapshot.files.first { $0.path == name }?.isWhitespaceAndImportsOnly, false, name)
         }
         _ = try repo.git(["add", "."])
         _ = try repo.git(["commit", "-m", "format changes"])
         let committed = try load(base: "HEAD~1", target: "HEAD", mergeBase: false)
-        XCTAssertEqual(committed.files.first { $0.path == "Odd \"path\"\t\n.kt" }?.isFormattingOnly, true)
+        XCTAssertEqual(committed.files.first { $0.path == "Odd \"path\"\t\n.kt" }?.isWhitespaceAndImportsOnly, true)
+    }
+
+    func testCombinedIgnoreUsesCanonicalSourcesAcrossStagedWorktreeAndRevisionComparisons() throws {
+        let imports = (0..<25).map { "    member\($0),\n" }.joined()
+        let originals = [
+            "Odd \"path\"\t\n.kt": "package old\nimport a.One\nimport b.Two\nval value = 1\n",
+            "partial.py": "from old import (\n" + imports + ")\nprint('yes')\n",
+            "mixed.go": "package example\nimport \"fmt\"\nvar value = 1\n",
+            "canonical.go": "package example\nimport \"fmt\"\nvar value = 1\n",
+            "rename.kt": "import a.One\nval value = 1\n",
+            "added.go": ""
+        ]
+        try write(".gitattributes", "canonical.go text eol=crlf\n")
+        for (name, source) in originals { try write(name, source) }
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "ignore baseline"])
+        try write("Odd \"path\"\t\n.kt", "package new\nimport b.Two\nimport c.Three\nval value=1\n")
+        _ = try repo.git(["add", "--", "Odd \"path\"\t\n.kt"])
+        try write("partial.py", originals["partial.py"]!.replacingOccurrences(of: "member12", with: "replacement"))
+        try write("mixed.go", "package changed\nimport \"os\"\nvar value = 2\n")
+        try write("canonical.go", "package changed\r\nimport \"os\"\r\nvar   value=1\r\n")
+        _ = try repo.git(["mv", "--", "rename.kt", "renamed.kt"])
+        try write("added.go", "package added\nimport \"os\"\n")
+        try write("untracked.go", "package untracked\nimport \"os\"\n")
+        let indexBefore = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+        let worktree = try load()
+        for path in ["Odd \"path\"\t\n.kt", "partial.py", "canonical.go", "added.go"] {
+            XCTAssertEqual(worktree.files.first { $0.path == path }?.isWhitespaceAndImportsOnly, true, path)
+        }
+        for path in ["mixed.go", "renamed.kt", "untracked.go"] {
+            XCTAssertEqual(worktree.files.first { $0.path == path }?.isWhitespaceAndImportsOnly, false, path)
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), indexBefore)
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "ignore changes"])
+        let revision = try load(base: "HEAD~1", target: "HEAD", mergeBase: false)
+        for path in ["Odd \"path\"\t\n.kt", "partial.py", "canonical.go", "added.go"] {
+            let live = try XCTUnwrap(worktree.files.first { $0.path == path })
+            let committed = try XCTUnwrap(revision.files.first { $0.path == path })
+            XCTAssertTrue(committed.isWhitespaceAndImportsOnly, path)
+            XCTAssertEqual(live.fingerprint, committed.fingerprint, path)
+        }
+    }
+
+    func testMixedGofmtChangesBecomeNeutralWithoutHidingAddedCodeOrChangingIdentity() throws {
+        try write("format.go", "package example\ntype Data struct {\n Name string\n Age int\n}\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "gofmt baseline"])
+        try write("format.go", "package example\ntype Data struct {\n Name   string\n Active bool\n Age    int\n}\n")
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "format.go" })
+        XCTAssertFalse(file.isWhitespaceAndImportsOnly)
+        let raw = DiffPresentation.rows(for: file)
+        let originalPairs = raw.compactMap { row -> DiffPair? in
+            if case .code(let pair) = row { return pair }
+            return nil
+        }
+        let pairs = DiffPresentation.ignoringWhitespace(in: originalPairs, file: file)
+        let name = try XCTUnwrap(pairs.first { $0.new?.text == " Name   string" })
+        XCTAssertEqual(name.old?.text, " Name string")
+        XCTAssertEqual(name.new?.kind, .context)
+        XCTAssertEqual(name.new?.oldNumber, 3)
+        XCTAssertEqual(name.new?.newNumber, 3)
+        let age = try XCTUnwrap(pairs.first { $0.new?.text == " Age    int" })
+        XCTAssertEqual(age.new?.kind, .context)
+        XCTAssertEqual(age.new?.oldNumber, 4)
+        XCTAssertEqual(age.new?.newNumber, 5)
+        let added = try XCTUnwrap(pairs.first { $0.new?.text == " Active bool" })
+        XCTAssertEqual(added.new?.kind, .addition)
+        XCTAssertNil(added.old)
+        XCTAssertEqual(DiffPresentation.sourceRows([age], layout: .unified).first?.pair.new?.text, " Age    int")
+        XCTAssertTrue(file.hunks.flatMap(\.lines).contains { $0.kind == .addition && $0.text == " Age    int" })
+        XCTAssertNotNil(originalPairs.first { $0.new?.text == " Age    int" && $0.new?.kind == .addition })
+        XCTAssertEqual(pairs.compactMap(\.old).map(\.text), originalPairs.compactMap(\.old).map(\.text))
+        XCTAssertEqual(pairs.compactMap(\.new).map(\.text), originalPairs.compactMap(\.new).map(\.text))
+    }
+
+    func testRepeatedWhitespaceLinesBlanksModesAndImportBoundariesKeepTheirOriginalSides() throws {
+        let sources = [
+            "repeated.kt": "fun run() {\n if (true) {\n  work()\n }\n}\n",
+            "literal.go": "package example\nvar text = `one\n\ntwo`\n",
+            "mode.kt": "val value = 1\n",
+            "imports.kt": "import old.One\nval value=1\n",
+            "moved.kt": "callOne()\ncallTwo()\n",
+            "new.go": ""
+        ]
+        for (path, source) in sources { try write(path, source) }
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "line identities baseline"])
+        try write("repeated.kt", "fun run() {\n  if (true) {\n    work()\n\n   }\n }\n")
+        try write("literal.go", "package example\nvar text = `one\n \ntwo`\n")
+        try write("mode.kt", "val  value=1\n")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("mode.kt").path)
+        try write("imports.kt", "import new.Two\nimport new.Three\nval value = 1\n")
+        try write("moved.kt", " callTwo()\n callOne()\n")
+        try write("new.go", "package example\n\nvar value = 1\n")
+        try write("untracked.go", "package example\n\nvar value = 1\n")
+        let snapshot = try load()
+        func file(_ path: String) throws -> FileDiff { try XCTUnwrap(snapshot.files.first { $0.path == path }) }
+        func pairs(_ file: FileDiff) -> [DiffPair] {
+            DiffPresentation.rows(for: file).compactMap {
+                if case .code(let pair) = $0 { return pair }
+                return nil
+            }
+        }
+        let repeated = try file("repeated.kt")
+        let repeatedPairs = DiffPresentation.ignoringWhitespace(in: pairs(repeated), file: repeated)
+        XCTAssertEqual(repeatedPairs.compactMap { $0.old?.oldNumber }, pairs(repeated).compactMap { $0.old?.oldNumber })
+        XCTAssertEqual(repeatedPairs.compactMap { $0.new?.newNumber }, pairs(repeated).compactMap { $0.new?.newNumber })
+        XCTAssertEqual(repeatedPairs.compactMap(\.old).map(\.text), pairs(repeated).compactMap(\.old).map(\.text))
+        XCTAssertEqual(repeatedPairs.compactMap(\.new).map(\.text), pairs(repeated).compactMap(\.new).map(\.text))
+        for text in ["   }", " }", "    work()"] {
+            XCTAssertEqual(repeatedPairs.first { $0.new?.text == text }?.new?.kind, .context, text)
+        }
+        let blank = try XCTUnwrap(repeatedPairs.first { $0.new?.text == "" && $0.old == nil })
+        XCTAssertEqual(blank.new?.kind, .context)
+        XCTAssertEqual(blank.new?.newNumber, 4)
+        XCTAssertEqual(DiffPresentation.sourceRows([blank], layout: .unified).first?.side, .new)
+        let literal = try file("literal.go")
+        XCTAssertTrue(literal.whitespaceChanges.isEmpty)
+        XCTAssertFalse(literal.isWhitespaceAndImportsOnly)
+        let mode = try file("mode.kt")
+        XCTAssertFalse(mode.isWhitespaceAndImportsOnly)
+        XCTAssertEqual(DiffPresentation.ignoringWhitespace(in: pairs(mode), file: mode).first?.new?.kind, .context)
+        let imports = try file("imports.kt")
+        let importsPairs = DiffPresentation.ignoringWhitespace(in: pairs(imports), file: imports)
+        XCTAssertEqual(importsPairs.first { $0.new?.text == "val value = 1" }?.old?.text, "val value=1")
+        XCTAssertEqual(importsPairs.first { $0.new?.text == "val value = 1" }?.new?.kind, .context)
+        XCTAssertEqual(importsPairs.compactMap { $0.old?.oldNumber }, pairs(imports).compactMap { $0.old?.oldNumber })
+        XCTAssertEqual(importsPairs.compactMap { $0.new?.newNumber }, pairs(imports).compactMap { $0.new?.newNumber })
+        XCTAssertEqual(importsPairs.compactMap(\.old).map(\.text), pairs(imports).compactMap(\.old).map(\.text))
+        XCTAssertEqual(importsPairs.compactMap(\.new).map(\.text), pairs(imports).compactMap(\.new).map(\.text))
+        XCTAssertTrue(try file("moved.kt").whitespaceChanges.isEmpty)
+        for path in ["new.go", "untracked.go"] {
+            let added = try file(path)
+            let neutral = DiffPresentation.ignoringWhitespace(in: pairs(added), file: added)
+            XCTAssertEqual(neutral.first { $0.new?.text == "" }?.new?.kind, .context, path)
+            XCTAssertEqual(neutral.first { $0.new?.text == "var value = 1" }?.new?.kind, .addition, path)
+        }
+        // The opposite direction preserves the deleted blank's old-side identity.
+        try write("new.go", "")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "blank removal baseline"])
+        try write("repeated.kt", "fun run() {\n  if (true) {\n    work()\n   }\n }\n")
+        let removed = try XCTUnwrap(try load().files.first { $0.path == "repeated.kt" })
+        let removedPairs = DiffPresentation.ignoringWhitespace(in: pairs(removed), file: removed)
+        let deletedBlank = try XCTUnwrap(removedPairs.first { $0.old?.text == "" && $0.new == nil })
+        XCTAssertEqual(deletedBlank.old?.kind, .context)
+        XCTAssertEqual(deletedBlank.old?.oldNumber, 4)
+        XCTAssertEqual(DiffPresentation.sourceRows([deletedBlank], layout: .unified).first?.side, .old)
+    }
+
+    func testRepeatedFormattingLinesStayNeutralAlongsideCodeChanges() throws {
+        try write("repeated.kt", "a  =1\na=1\nvalue=1\n")
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "repeated candidate baseline"])
+        try write("repeated.kt", "a=1\na=1\nvalue=2\n")
+        let snapshot = try load()
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "repeated.kt" })
+        XCTAssertFalse(file.isWhitespaceAndImportsOnly)
+        let original = DiffPresentation.rows(for: file).compactMap { row -> DiffPair? in
+            if case .code(let pair) = row { return pair }
+            return nil
+        }
+        let projected = DiffPresentation.ignoringWhitespace(in: original, file: file)
+        let formatted = try XCTUnwrap(projected.first { $0.old?.oldNumber == 1 })
+        XCTAssertEqual(formatted.new?.newNumber, 1)
+        XCTAssertEqual(formatted.new?.kind, .context)
+        XCTAssertEqual(projected.compactMap { $0.old?.oldNumber }, original.compactMap { $0.old?.oldNumber })
+        XCTAssertEqual(projected.compactMap { $0.new?.newNumber }, original.compactMap { $0.new?.newNumber })
+    }
+
+    func testWhitespaceProjectionConservesEachSideThroughRepeatedMovedAndMixedHunks() throws {
+        let cases: [(String, String)] = [
+            ("a  =1\na=1\nvalue=1\n", "a=1\na=1\nvalue=2\n"),
+            ("A ()\nX()\nY()\nX()\nZ(1)\n", "X()\nA()\nY()\nX()\nZ(2)\n"),
+            ("start()\n }\n}\nend(1)\n", "start()\n}\n }\nend(2)\n"),
+            ("start()\n }\n }\nend(1)\n", "start()\n }\nadded()\n  }\nend(2)\n"),
+            ("start()\n\n }\n}\nend()\n", "start()\n }\n\n }\nend()\n"),
+            ("start()\nwork ()\n }\n}\nend(1)\n", "start()\nwork()\n  }\n }\nend(2)\n")
+        ]
+        for (index, texts) in cases.enumerated() { try write("Case\(index).kt", texts.0) }
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "projection conservation baseline"])
+        for (index, texts) in cases.enumerated() { try write("Case\(index).kt", texts.1) }
+        for file in try load().files where file.path.hasPrefix("Case") {
+            let rows = DiffPresentation.rows(for: file)
+            var source: [DiffPair] = []
+            for row in rows {
+                if case .code(let pair) = row { source.append(pair) }
+            }
+            let projected = DiffPresentation.ignoringWhitespace(in: source, file: file)
+            XCTAssertEqual(projected.compactMap { $0.old?.oldNumber }, source.compactMap { $0.old?.oldNumber }, file.path)
+            XCTAssertEqual(projected.compactMap { $0.new?.newNumber }, source.compactMap { $0.new?.newNumber }, file.path)
+            XCTAssertEqual(projected.compactMap(\.old).map(\.text), source.compactMap(\.old).map(\.text), file.path)
+            XCTAssertEqual(projected.compactMap(\.new).map(\.text), source.compactMap(\.new).map(\.text), file.path)
+        }
     }
 
     func testProcessDrainsBothStreamsAndTimesOutWithDiagnostics() throws {

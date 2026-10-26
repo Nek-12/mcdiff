@@ -1,0 +1,29 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check toolchain
+        run: swift --version
+      - name: Test
+        run: swift test
+      - name: Build universal app
+        run: bash scripts/build-app.sh --arch universal
+      - name: Verify release packaging
+        run: |
+          bash scripts/package-release.sh dist/McDiff.app dist/release
+          bash scripts/test-release.sh

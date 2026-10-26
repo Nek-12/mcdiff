@@ -67,7 +67,7 @@ final class HomeIntegrationTests: XCTestCase {
         let store = try ReviewStore(directory: directory.appendingPathComponent(".review"))
         let controller = ReviewWindowController(github: GitHubClient(clientID: "test", credentials: EmptyHomeCredentials()))
         controller.start(store: store, arguments: ["--repo", directory.path])
-        await waitFor { controller.screen == .review }
+        await waitFor { controller.isReviewReady }
         let window = try XCTUnwrap(controller.window)
         window.isReleasedWhenClosed = false
         defer { window.delegate = nil; controller.close() }

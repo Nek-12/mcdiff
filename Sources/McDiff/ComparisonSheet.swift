@@ -2,6 +2,11 @@ import AppKit
 import McDiffCore
 
 final class ComparisonSheet: NSWindowController {
+    enum Action {
+        case chooseRepository
+        case open(ComparisonInput)
+        case cancel
+    }
     private let tabs = NSSegmentedControl(labels: ["GitHub pull request", "Local comparison"], trackingMode: .selectOne, target: nil, action: nil)
     private let urlField = NSTextField()
     private let repositoryField = NSTextField()
@@ -13,12 +18,11 @@ final class ComparisonSheet: NSWindowController {
     private let descriptionField = Style.label("", size: 11, color: .secondaryLabelColor)
     private let prContent = NSView()
     private let localContent = NSView()
-    private var onOpen: (String?, ComparisonRequest?) -> Void
-    private var branchTask: Task<Void, Never>?
+    private let onAction: (Action) -> Void
     private var openButton: NSButton!
 
-    init(recent: ComparisonRequest?, onOpen: @escaping (String?, ComparisonRequest?) -> Void) {
-        self.onOpen = onOpen
+    init(recent: ComparisonRequest?, clipboardURL: String? = nil, onAction: @escaping (Action) -> Void) {
+        self.onAction = onAction
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 260),
                               styleMask: [.titled], backing: .buffered, defer: false)
         super.init(window: window)
@@ -93,12 +97,11 @@ final class ComparisonSheet: NSWindowController {
             actions.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16)
         ])
         if let recent { repositoryField.stringValue = recent.repository; tabs.selectedSegment = recent.pullRequestURL == nil ? 1 : 0 }
-        if let clipboard = NSPasteboard.general.string(forType: .string), (try? GitHubPR.parse(clipboard.trimmingCharacters(in: .whitespacesAndNewlines))) != nil {
-            urlField.stringValue = clipboard.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let clipboardURL {
+            urlField.stringValue = clipboardURL
             tabs.selectedSegment = 0
         } else if let url = recent?.pullRequestURL { urlField.stringValue = url }
         tabChanged()
-        if let recent { loadBranches(path: recent.repository, chooseDefault: false) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func present(on parent: NSWindow) {
@@ -116,80 +119,51 @@ final class ComparisonSheet: NSWindowController {
         if !revisionField.isHidden { window?.makeFirstResponder(revisionField) }
     }
     @objc private func chooseFolder() {
-        guard let window else { return }
-        let picker = NSOpenPanel()
-        picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.allowsMultipleSelection = false
-        picker.message = "Select the Git checkout or worktree to review."
-        picker.beginSheetModal(for: window) { [weak self] result in
-            guard result == .OK, let path = picker.url?.path else { return }
-            self?.repositoryField.stringValue = path
-            self?.loadBranches(path: path, chooseDefault: true)
-        }
+        onAction(.chooseRepository)
     }
-    private func loadBranches(path: String, chooseDefault: Bool) {
-        branchTask?.cancel()
-        descriptionField.stringValue = "Reading local branches…"
-        branchTask = Task { [weak self] in
-            do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    let git = GitRepository(path: path)
-                    return try (git.branches(), git.defaultBase())
-                }.value
-                guard !Task.isCancelled, let self else { return }
-                self.baseField.removeAllItems(); self.baseField.addItems(withObjectValues: result.0)
-                let selected = self.targetField.selectedItem?.representedObject as? String
-                let customRevision = self.targetField.selectedItem === self.revisionItem
-                self.targetField.removeAllItems()
-                self.targetField.addItem(withTitle: "Working tree")
-                var branches = result.0
-                if let selected, !branches.contains(selected) { branches.append(selected) }
-                for branch in branches {
-                    self.targetField.addItem(withTitle: branch)
-                    self.targetField.lastItem?.representedObject = branch
-                }
-                self.targetField.menu?.addItem(self.revisionItem)
-                if !chooseDefault, let selected { self.targetField.selectItem(withTitle: selected) }
-                if !chooseDefault, customRevision { self.targetField.select(self.revisionItem) }
-                self.targetChanged()
-                if chooseDefault { self.baseField.stringValue = result.1 }
-                self.descriptionField.stringValue = ""
-            } catch {
-                guard !Task.isCancelled else { return }
-                self?.descriptionField.stringValue = error.localizedDescription
-            }
+    func setRepository(path: String) {
+        repositoryField.stringValue = path
+    }
+    func setBranches(_ result: ComparisonBranches, chooseDefault: Bool) {
+        let base = baseField.stringValue
+        baseField.removeAllItems()
+        baseField.addItems(withObjectValues: result.branches)
+        baseField.stringValue = chooseDefault ? result.defaultBase : base
+        let selected = targetField.selectedItem?.representedObject as? String
+        let customRevision = targetField.selectedItem === revisionItem
+        targetField.removeAllItems()
+        targetField.addItem(withTitle: "Working tree")
+        var branches = result.branches
+        if !chooseDefault, let selected, !branches.contains(selected) { branches.append(selected) }
+        for branch in branches {
+            targetField.addItem(withTitle: branch)
+            targetField.lastItem?.representedObject = branch
         }
+        targetField.menu?.addItem(revisionItem)
+        if !chooseDefault, let selected { targetField.selectItem(withTitle: selected) }
+        if !chooseDefault, customRevision { targetField.select(revisionItem) }
+        targetChanged()
+        showStatus("")
+    }
+    func showStatus(_ message: String, failed: Bool = false) {
+        descriptionField.stringValue = message
+        descriptionField.textColor = failed ? .systemRed : .secondaryLabelColor
+        descriptionField.toolTip = message
     }
     @objc private func openReview() {
         if tabs.selectedSegment == 0 {
-            let url = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            do { _ = try GitHubPR.parse(url) }
-            catch { showError(error.localizedDescription); return }
-            dismiss(); onOpen(url, nil)
+            onAction(.open(.pullRequest(urlField.stringValue)))
         } else {
             let path = repositoryField.stringValue
-            let base = baseField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = baseField.stringValue
             let target = targetField.selectedItem === revisionItem
-                ? revisionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                ? revisionField.stringValue
                 : targetField.selectedItem?.representedObject as? String
-            guard target != "" else {
-                showError("Enter a tag, commit, or ref for the target revision."); return
-            }
-            guard !path.isEmpty, !base.isEmpty else {
-                showError("Choose a repository and enter the revisions to compare."); return
-            }
-            let request = ComparisonRequest(repository: path, base: base, target: target, mergeBase: mergeBase.state == .on)
-            dismiss(); onOpen(nil, request)
+            onAction(.open(.local(repository: path, base: base, target: target, mergeBase: mergeBase.state == .on)))
         }
     }
-    private func showError(_ message: String) {
-        guard let window else { return }
-        let alert = NSAlert(); alert.messageText = "Cannot open review"; alert.informativeText = message
-        alert.addButton(withTitle: "OK").bezelStyle = .glass
-        alert.beginSheetModal(for: window)
-    }
-    @objc private func cancel() { dismiss() }
-    private func dismiss() {
-        branchTask?.cancel()
+    @objc private func cancel() { onAction(.cancel) }
+    func dismiss() {
         if let window { window.sheetParent?.endSheet(window); window.orderOut(nil) }
     }
 }

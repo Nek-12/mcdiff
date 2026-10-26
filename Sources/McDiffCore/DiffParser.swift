@@ -114,7 +114,6 @@ public enum DiffParser {
             let fingerprint = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
             files.append(FileDiff(path: path, oldPath: oldPath, status: status, hunks: hunks, isBinary: binary,
                                   fingerprint: fingerprint, category: FileClassifier.classify(path),
-                                  isFormattingOnly: !binary && FileClassifier.isFormattingOnly(path: path, hunks: hunks, metadataChanged: metadataChanged),
                                   hasMetadataChanges: metadataChanged, isGitlink: gitlink))
         }
         return files

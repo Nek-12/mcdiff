@@ -76,7 +76,8 @@ extension FileDiff {
 actor DiffSearchEngine {
     func search(query: String, files: [FileDiff], presentations: [String: [PresentedRow]],
                 markdown: [String: MarkdownFileContent], sourcePaths: Set<String>, layout: DiffLayout = .split,
-                context: [String: [Int: [DiffPair]]] = [:]) throws -> DiffSearchResults {
+                context: [String: [Int: [DiffPair]]] = [:],
+                ignoringWhitespace: Bool = false) throws -> DiffSearchResults {
         var groups: [DiffSearchResults.Group] = []
         var matchingFiles: [Int] = []
         var count = 0
@@ -108,7 +109,8 @@ actor DiffSearchEngine {
             }
             var code: [DiffPair] = []
             func appendPairs(_ pairs: [DiffPair], importBlock: Int?) throws {
-                for row in DiffPresentation.sourceRows(pairs, layout: layout) {
+                let displayed = ignoringWhitespace ? DiffPresentation.ignoringWhitespace(in: pairs, file: file) : pairs
+                for row in DiffPresentation.sourceRows(displayed, layout: layout) {
                     let pair = row.pair
                     // Context is one occurrence in either layout.
                     if let line = pair.new, line.kind == .context, pair.old?.text == line.text,

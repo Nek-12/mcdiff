@@ -43,98 +43,147 @@ public enum FileClassifier {
         return .production
     }
 
-    public static func supportsFormattingComparison(path: String) -> Bool {
-        ["kt", "kts", "java", "go", "ts", "js", "mjs", "cjs", "rs", "json"].contains((path as NSString).pathExtension.lowercased())
+    public static func supportsWhitespaceAndImportsComparison(path: String) -> Bool {
+        ["kt", "kts", "java", "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs",
+         "py", "pyi", "swift", "c", "h", "cpp", "hpp", "cs", "proto", "json", "jsonc"]
+            .contains((path as NSString).pathExtension.lowercased())
     }
 
     /// Requires complete source on both sides: a hunk may begin inside a literal.
-    public static func isFormattingOnly(path: String, oldContent: String, newContent: String) -> Bool {
-        guard supportsFormattingComparison(path: path), oldContent != newContent else { return false }
-        func tokens(_ source: String) -> [[String]]? {
-            // These constructs need language-specific, potentially nested lexical
-            // state. Uncertain files stay visible instead of being auto-reviewed.
-            guard !["\"\"\"", "'''", "`", "/*", "*/"].contains(where: source.contains) else { return nil }
-            var result: [[String]] = []
-            for line in source.components(separatedBy: "\n") {
-                let chars = Array(line)
-                var row: [String] = [], i = 0
-                while i < chars.count {
-                    let c = chars[i]
-                    if c == " " || c == "\t" { i += 1; continue }
-                    if c == "\"" || c == "'" {
-                        // Rust raw/byte string prefixes require a different lexer.
-                        if i > 0 && (chars[i - 1] == "r" || chars[i - 1] == "b") { return nil }
-                        let start = i
-                        i += 1
-                        var closed = false
-                        while i < chars.count {
-                            if chars[i] == "\\" { i += 2; continue }
-                            if chars[i] == c { i += 1; closed = true; break }
-                            i += 1
-                        }
-                        guard closed, i <= chars.count else { return nil }
-                        row.append(String(chars[start..<i]))
-                    } else if c == "/" {
-                        if i + 1 < chars.count && chars[i + 1] == "/" {
-                            // A standalone Go //line or //go directive can depend
-                            // on its column; preserve the entire comment line.
-                            row.append(row.isEmpty ? line : String(chars[i...])); i = chars.count
-                        } else {
-                            // JavaScript regex literals make slash ambiguous.
-                            return nil
-                        }
-                    } else if c == "\\" || c == "#" {
-                        return nil
-                    } else {
-                        func word(_ c: Character) -> Bool {
-                            c.isLetter || c.isNumber || c == "_" || c == "$" ||
-                                c.unicodeScalars.allSatisfy { CharacterSet.nonBaseCharacters.contains($0) }
-                        }
-                        let operators = "=<>!&|+-*%^~?:."
-                        let start = i
-                        i += 1
-                        if word(c) {
-                            while i < chars.count && word(chars[i]) { i += 1 }
-                        } else if operators.contains(c) {
-                            while i < chars.count && operators.contains(chars[i]) { i += 1 }
-                        }
-                        row.append(String(chars[start..<i]))
-                    }
-                }
-                result.append(row)
-            }
-            return result
-        }
-        guard let old = tokens(oldContent), let new = tokens(newContent) else { return false }
-        return old == new
+    public static func isWhitespaceAndImportsOnly(path: String, oldContent: String, newContent: String) -> Bool {
+        guard supportsWhitespaceAndImportsComparison(path: path), oldContent != newContent else { return false }
+        let ext = (path as NSString).pathExtension.lowercased()
+        let old = SourceLexing(oldContent, ext: ext), new = SourceLexing(newContent, ext: ext)
+        return isWhitespaceAndImportsOnly(old: old, new: new, oldExtension: ext, newExtension: ext)
     }
 
-    // JSON has no multiline strings and insignificant whitespace outside strings.
-    // Other languages require full-file lexical context to make this decision safely.
-    static func isFormattingOnly(path: String, hunks: [DiffHunk], metadataChanged: Bool) -> Bool {
-        guard !metadataChanged, (path as NSString).pathExtension.lowercased() == "json",
-              hunks.contains(where: { $0.lines.contains { $0.kind != .context } }) else { return false }
-        func tokens(_ lines: [DiffLine], excluding kind: LineKind) -> String? {
-            var result = "", quoted = false, escaped = false
-            for line in lines where line.kind != kind {
-                for c in line.text {
-                    if quoted {
-                        result.append(c)
-                        if escaped { escaped = false }
-                        else if c == "\\" { escaped = true }
-                        else if c == "\"" { quoted = false }
-                    } else if c == "\"" {
-                        quoted = true; result.append(c)
-                    } else if !c.isWhitespace { result.append(c) }
-                }
-                if quoted { return nil }
+    static func ignoredChanges(file: FileDiff, oldContent: String, newContent: String)
+        -> (wholeFile: Bool, lines: [WhitespaceChange]) {
+        let oldExtension = (file.oldPath as NSString).pathExtension.lowercased()
+        let newExtension = (file.path as NSString).pathExtension.lowercased()
+        let old = SourceLexing(oldContent, ext: oldExtension), new = SourceLexing(newContent, ext: newExtension)
+        let wholeFile = file.status == "M" && !file.hasMetadataChanges &&
+            isWhitespaceAndImportsOnly(old: old, new: new, oldExtension: oldExtension, newExtension: newExtension)
+        guard let oldNormalized = old.normalized, let newNormalized = new.normalized else { return (wholeFile, []) }
+        var changes: [WhitespaceChange] = []
+        for hunk in file.hunks {
+            changes += whitespaceMatches(old: hunk.lines.filter { $0.kind != .addition },
+                                          new: hunk.lines.filter { $0.kind != .deletion },
+                                          oldNormalized: oldNormalized, newNormalized: newNormalized)
+        }
+        return (wholeFile, changes)
+    }
+
+    private static func isWhitespaceAndImportsOnly(old: SourceLexing, new: SourceLexing,
+                                                  oldExtension: String, newExtension: String) -> Bool {
+        let oldImports = DiffPresentation.sourceImportNumbers(old, ext: oldExtension)
+        let newImports = DiffPresentation.sourceImportNumbers(new, ext: newExtension)
+        func remaining(_ lines: [String], imports: Set<Int>) -> [String] {
+            lines.enumerated().compactMap { imports.contains($0.offset + 1) ? nil : $0.element }
+        }
+        if let oldNormalized = old.normalized, let newNormalized = new.normalized {
+            return remaining(oldNormalized, imports: oldImports).joined().utf8.elementsEqual(
+                remaining(newNormalized, imports: newImports).joined().utf8)
+        }
+        // Even an ambiguous regex/JSX construct does not prevent recognizing
+        // imports-only changes when the rest of the source is byte-for-byte equal.
+        return remaining(old.lines, imports: oldImports).joined(separator: "\n").utf8.elementsEqual(
+            remaining(new.lines, imports: newImports).joined(separator: "\n").utf8)
+    }
+
+    /// Stable ordered anchors and equal gaps match repeated formatting lines
+    /// without a quadratic edit matrix or interpreting moved code as whitespace.
+    private static func whitespaceMatches(old: [DiffLine], new: [DiffLine],
+                                          oldNormalized: [String], newNormalized: [String]) -> [WhitespaceChange] {
+        func normalized(_ line: DiffLine, side: DiffSide) -> String? {
+            guard let number = side == .old ? line.oldNumber : line.newNumber else { return nil }
+            let source = side == .old ? oldNormalized : newNormalized
+            guard number > 0, number <= source.count else { return nil }
+            return source[number - 1]
+        }
+        func equivalent(_ lhs: DiffLine, _ rhs: DiffLine) -> Bool {
+            guard let old = normalized(lhs, side: .old), let new = normalized(rhs, side: .new) else { return false }
+            return old.utf8.elementsEqual(new.utf8)
+        }
+        let oldNonblank = old.filter { normalized($0, side: .old)?.isEmpty == false }
+        let newNonblank = new.filter { normalized($0, side: .new)?.isEmpty == false }
+        var oldPositions: [String: [Int]] = [:], newPositions: [String: [Int]] = [:]
+        for (index, line) in oldNonblank.enumerated() {
+            if let key = normalized(line, side: .old) { oldPositions[key, default: []].append(index) }
+        }
+        for (index, line) in newNonblank.enumerated() {
+            if let key = normalized(line, side: .new) { newPositions[key, default: []].append(index) }
+        }
+        var result: [WhitespaceChange] = []
+        for line in old where normalized(line, side: .old)?.isEmpty == true {
+            result.append(.init(oldNumber: line.oldNumber, newNumber: nil))
+        }
+        for line in new where normalized(line, side: .new)?.isEmpty == true {
+            result.append(.init(oldNumber: nil, newNumber: line.newNumber))
+        }
+        let sameInventory = oldPositions.mapValues { $0.count } == newPositions.mapValues { $0.count }
+        let sameOrder = oldNonblank.count == newNonblank.count && zip(oldNonblank, newNonblank).allSatisfy {
+            equivalent($0.0, $0.1)
+        }
+        if sameInventory && !sameOrder { return result }
+        let newIndices = Dictionary(uniqueKeysWithValues: newNonblank.enumerated().compactMap { index, line -> (Int, Int)? in
+            line.newNumber.map { ($0, index) }
+        })
+        var contextPrefix = Array(repeating: -1, count: oldNonblank.count + 1)
+        var contextSuffix = Array(repeating: newNonblank.count, count: oldNonblank.count + 1)
+        for (index, line) in oldNonblank.enumerated() {
+            let counterpart = line.kind == .context ? line.newNumber.flatMap { newIndices[$0] } : nil
+            contextPrefix[index + 1] = max(contextPrefix[index], counterpart ?? -1)
+            contextSuffix[index] = counterpart ?? newNonblank.count
+        }
+        for index in oldNonblank.indices.reversed() {
+            contextSuffix[index] = min(contextSuffix[index], contextSuffix[index + 1])
+        }
+        let candidates = newNonblank.enumerated().compactMap { index, line -> (old: Int, new: Int)? in
+            guard let key = normalized(line, side: .new),
+                  let positions = oldPositions[key], positions.count == 1, newPositions[key]?.count == 1,
+                  index > contextPrefix[positions[0]], index < contextSuffix[positions[0] + 1],
+                  let oldKey = normalized(oldNonblank[positions[0]], side: .old),
+                  key.utf8.elementsEqual(oldKey.utf8) else { return nil }
+            return (positions[0], index)
+        }
+        var suffixMinimum = Array(repeating: oldNonblank.count, count: candidates.count + 1)
+        for index in candidates.indices.reversed() {
+            suffixMinimum[index] = min(suffixMinimum[index + 1], candidates[index].old)
+        }
+        var prefixMaximum = -1, anchors: [(old: Int, new: Int)] = []
+        for (index, anchor) in candidates.enumerated() {
+            if anchor.old > prefixMaximum && anchor.old < suffixMinimum[index + 1] { anchors.append(anchor) }
+            prefixMaximum = max(prefixMaximum, anchor.old)
+        }
+        func append(_ lhs: DiffLine, _ rhs: DiffLine) {
+            let retargetedContext = (lhs.kind == .context && lhs.newNumber != rhs.newNumber) ||
+                (rhs.kind == .context && rhs.oldNumber != lhs.oldNumber)
+            if !lhs.text.utf8.elementsEqual(rhs.text.utf8) || retargetedContext {
+                result.append(.init(oldNumber: lhs.oldNumber, newNumber: rhs.newNumber))
             }
-            return result
         }
-        return hunks.allSatisfy {
-            guard let old = tokens($0.lines, excluding: .addition),
-                  let new = tokens($0.lines, excluding: .deletion) else { return false }
-            return old == new
+        var oldStart = 0, newStart = 0
+        for anchor in anchors + [(oldNonblank.count, newNonblank.count)] {
+            // Equal ordered prefixes/suffixes also cover repeated braces next
+            // to a real insertion or edit, without choosing a moved occurrence.
+            var left = oldStart, right = newStart
+            while left < anchor.old && right < anchor.new &&
+                    equivalent(oldNonblank[left], newNonblank[right]) {
+                append(oldNonblank[left], newNonblank[right])
+                left += 1; right += 1
+            }
+            var oldEnd = anchor.old, newEnd = anchor.new
+            while oldEnd > left && newEnd > right &&
+                    equivalent(oldNonblank[oldEnd - 1], newNonblank[newEnd - 1]) {
+                oldEnd -= 1; newEnd -= 1
+                append(oldNonblank[oldEnd], newNonblank[newEnd])
+            }
+            if anchor.old < oldNonblank.count && anchor.new < newNonblank.count {
+                append(oldNonblank[anchor.old], newNonblank[anchor.new])
+            }
+            oldStart = anchor.old + 1; newStart = anchor.new + 1
         }
+        return result
     }
 }

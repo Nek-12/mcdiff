@@ -1,0 +1,156 @@
+name: Release
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [closed]
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    # Never build external PR code with publishing credentials.
+    if: >-
+      github.repository == 'Nek-12/mcdiff' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+       (github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == github.event.repository.default_branch &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'autorelease')))
+    runs-on: macos-26
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A merged event builds its exact reviewed merge, not a moving branch tip.
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate version and publishing configuration
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BREW_TAP_TOKEN: ${{ secrets.BREW_TAP_TOKEN }}
+        run: |
+          test -n "$BREW_TAP_TOKEN" || { echo "Configure BREW_TAP_TOKEN with Contents read/write on Nek-12/homebrew-tap." >&2; exit 1; }
+          # API/auth failures must not be mistaken for a free release number.
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" --jq 'add' > "$RUNNER_TEMP/releases.json"
+          bash scripts/next-version.sh "$RUNNER_TEMP/releases.json" >> "$GITHUB_OUTPUT"
+      - name: Test
+        run: swift test
+      - name: Build and verify universal archive
+        run: |
+          bash scripts/build-app.sh --arch universal
+          bash scripts/package-release.sh dist/McDiff.app dist/release
+          bash scripts/test-release.sh
+      - name: Prepare personal Homebrew tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nek-12/homebrew-tap
+          ref: master
+          token: ${{ secrets.BREW_TAP_TOKEN }}
+          path: homebrew-tap
+          persist-credentials: false
+      - name: Generate and validate cask
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ruby scripts/update-tap.rb "dist/release/McDiff-$VERSION-macos-universal.zip" homebrew-tap
+          ruby -c homebrew-tap/Casks/mcdiff.rb
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- VERSION; then
+            git add VERSION
+            git commit -m "chore: release McDiff $VERSION [skip ci]"
+          fi
+          # A normal fast-forward push fails if default branch advanced during the build.
+          # No force-push, and never publish a stale merge over newer work.
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            push origin "HEAD:$DEFAULT_BRANCH" || {
+              echo "Could not update the default branch. Check the Git error above; if it advanced, dispatch a fresh release from its current tip." >&2
+              exit 1
+            }
+          # No tag or release is created until all tests and packaging pass.
+          gh release create "v$VERSION" \
+            "dist/release/McDiff-$VERSION-macos-universal.zip" dist/release/SHA256SUMS \
+            --target "$(git rev-parse HEAD)" --title "McDiff $VERSION" \
+            --notes "Universal app for macOS 26 and later. Download the ZIP or install with Homebrew; see README for instructions." \
+            --draft || {
+              echo "Release creation failed. Check the GitHub error above and resolve any incomplete draft or tag before dispatching a fresh release." >&2
+              exit 1
+            }
+          gh release edit "v$VERSION" --draft=false || {
+            echo "Publication failed. Check the GitHub error above and resolve the draft before dispatching a fresh release." >&2
+            exit 1
+          }
+  update-tap:
+    # Retry a failed tap push independently, without creating another release.
+    needs: release
+    runs-on: macos-26
+    steps:
+      - name: Check release is still current
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          latest="$(gh release view --json tagName --jq .tagName)"
+          if [[ "$latest" == "v$VERSION" ]]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "A newer release is current ($latest); leaving the tap unchanged."
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.current.outputs.value == 'true'
+        with:
+          ref: v${{ needs.release.outputs.version }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.current.outputs.value == 'true'
+        with:
+          repository: Nek-12/homebrew-tap
+          ref: master
+          token: ${{ secrets.BREW_TAP_TOKEN }}
+          path: homebrew-tap
+          persist-credentials: false
+      - name: Download and verify published archive
+        if: steps.current.outputs.value == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          gh release download "v$VERSION" --dir dist/release \
+            --pattern "McDiff-$VERSION-macos-universal.zip" --pattern SHA256SUMS
+          (cd dist/release && shasum -a 256 -c SHA256SUMS)
+          ruby scripts/update-tap.rb "dist/release/McDiff-$VERSION-macos-universal.zip" homebrew-tap
+          ruby -c homebrew-tap/Casks/mcdiff.rb
+      - name: Update personal Homebrew tap
+        if: steps.current.outputs.value == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.BREW_TAP_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          git -C homebrew-tap config user.name "github-actions[bot]"
+          git -C homebrew-tap config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Casks/mcdiff.rb
+          if git -C homebrew-tap diff --cached --quiet; then
+            echo "Tap already contains McDiff $VERSION."
+            exit 0
+          fi
+          git -C homebrew-tap commit -m "Update McDiff to $VERSION"
+          # gh supplies credentials only for this push; never persist the personal token.
+          git -C homebrew-tap -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin HEAD:master

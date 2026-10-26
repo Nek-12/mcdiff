@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import Darwin
 
 public enum DiffLayout: String, Codable, Sendable {
     case split, unified
@@ -76,9 +75,17 @@ public final class ReviewStore: @unchecked Sendable {
         try lock.withLock { try write(preferences, name: "preferences.json") }
     }
 
-    /// Archives saved progress and returns its round directory. A round is complete only
-    /// when progress.json exists; metadata-only directories are uncommitted preparations.
+    /// Archives the saved round, clears its comments, and keeps manual review fingerprints.
     public func finishReview(snapshot: ReviewSnapshot) throws -> URL {
+        try archiveReview(snapshot: snapshot, retainingReviewed: true)
+    }
+
+    /// Archives the saved round and clears both comments and manual review decisions.
+    public func resetReview(snapshot: ReviewSnapshot) throws -> URL {
+        try archiveReview(snapshot: snapshot, retainingReviewed: false)
+    }
+
+    private func archiveReview(snapshot: ReviewSnapshot, retainingReviewed: Bool) throws -> URL {
         try lock.withLock {
             let name = progressName(snapshot.identity)
             let activeURL = directory.appendingPathComponent(name)
@@ -86,27 +93,18 @@ public final class ReviewStore: @unchecked Sendable {
             do { savedData = try Data(contentsOf: activeURL) }
             catch CocoaError.fileReadNoSuchFile { savedData = try JSONEncoder().encode(ReviewProgress()) }
             // Never archive unreadable progress and silently replace it with an empty review.
-            _ = try JSONDecoder().decode(ReviewProgress.self, from: savedData)
+            let saved = try JSONDecoder().decode(ReviewProgress.self, from: savedData)
+            let next = ReviewProgress(reviewed: retainingReviewed ? saved.reviewed : [:])
 
             let metadata = CompletedReviewMetadata(snapshot: snapshot)
             let archive = directory.appendingPathComponent("completed-reviews", isDirectory: true)
                 .appendingPathComponent(metadata.id.uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
             try JSONEncoder().encode(metadata).write(to: archive.appendingPathComponent("metadata.json"), options: .atomic)
-            if !FileManager.default.fileExists(atPath: activeURL.path) {
-                try savedData.write(to: activeURL, options: .atomic)
-            }
-
-            let completedURL = archive.appendingPathComponent("progress.json")
-            // Both paths share the store volume. Rename is the single atomic commit:
-            // it preserves the exact saved bytes and removes the active round together.
-            guard rename(activeURL.path, completedURL.path) == 0 else {
-                let code = errno
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
-                    NSLocalizedDescriptionKey: "Could not finish the review: \(String(cString: strerror(code))). Saved review progress is unchanged.",
-                    NSFilePathErrorKey: activeURL.path
-                ])
-            }
+            try savedData.write(to: archive.appendingPathComponent("progress.json"), options: .atomic)
+            // Prepare the complete historical snapshot before replacing active progress.
+            // This atomic replacement is the commit; nothing fallible follows it.
+            try write(next, name: name)
             return archive
         }
     }

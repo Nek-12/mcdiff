@@ -48,6 +48,31 @@ public enum FileCategory: String, Codable, Sendable, CaseIterable {
     case production, tests, documentation, generated
 }
 
+public struct WhitespaceChange: Hashable, Sendable {
+    public let oldNumber: Int?
+    public let newNumber: Int?
+    public init(oldNumber: Int?, newNumber: Int?) {
+        self.oldNumber = oldNumber; self.newNumber = newNumber
+    }
+}
+
+public struct WhitespaceChanges: Sendable {
+    let pairsByOld: [Int: Int]
+    let pairedNewLines: Set<Int>
+    let oldBlankLines: Set<Int>
+    let newBlankLines: Set<Int>
+    public var isEmpty: Bool { pairsByOld.isEmpty && oldBlankLines.isEmpty && newBlankLines.isEmpty }
+    init(_ changes: [WhitespaceChange]) {
+        pairsByOld = Dictionary(uniqueKeysWithValues: changes.compactMap { change -> (Int, Int)? in
+            guard let old = change.oldNumber, let new = change.newNumber else { return nil }
+            return (old, new)
+        })
+        pairedNewLines = Set(pairsByOld.values)
+        oldBlankLines = Set(changes.filter { $0.newNumber == nil }.compactMap(\.oldNumber))
+        newBlankLines = Set(changes.filter { $0.oldNumber == nil }.compactMap(\.newNumber))
+    }
+}
+
 public struct FileDiff: Identifiable, Sendable {
     public var id: String { path }
     public let path: String
@@ -59,7 +84,8 @@ public struct FileDiff: Identifiable, Sendable {
     public let isGitlink: Bool
     public let fingerprint: String
     public let category: FileCategory
-    public let isFormattingOnly: Bool
+    public let isWhitespaceAndImportsOnly: Bool
+    public let whitespaceChanges: WhitespaceChanges
     public let hasMetadataChanges: Bool
     public var additions: Int { hunks.reduce(0) { $0 + $1.lines.filter { $0.kind == .addition }.count } }
     public var deletions: Int { hunks.reduce(0) { $0 + $1.lines.filter { $0.kind == .deletion }.count } }
@@ -84,10 +110,12 @@ public struct FileDiff: Identifiable, Sendable {
     }
     public init(path: String, oldPath: String? = nil, status: String = "M", hunks: [DiffHunk],
                 isBinary: Bool = false, fingerprint: String, category: FileCategory = .production,
-                isFormattingOnly: Bool = false, hasMetadataChanges: Bool = false, isGitlink: Bool = false) {
+                isWhitespaceAndImportsOnly: Bool = false, hasMetadataChanges: Bool = false, isGitlink: Bool = false,
+                whitespaceChanges: [WhitespaceChange] = []) {
         self.path = path; self.oldPath = oldPath ?? path; self.status = status; self.hunks = hunks
         self.isBinary = isBinary; self.fingerprint = fingerprint; self.category = category
-        self.isFormattingOnly = isFormattingOnly
+        self.isWhitespaceAndImportsOnly = isWhitespaceAndImportsOnly
+        self.whitespaceChanges = WhitespaceChanges(whitespaceChanges)
         self.hasMetadataChanges = hasMetadataChanges
         self.isGitlink = isGitlink
     }
@@ -109,6 +137,10 @@ public struct ComparisonRequest: Codable, Equatable, Sendable {
     }
 }
 
+public enum ComparisonWarning: Sendable, Equatable {
+    case multipleMergeBases(alternatives: [String])
+}
+
 public struct ReviewSnapshot: Sendable {
     public let request: ComparisonRequest
     public let identity: String
@@ -116,10 +148,12 @@ public struct ReviewSnapshot: Sendable {
     public let baseRevision: String
     public let targetRevision: String?
     public let files: [FileDiff]
+    public let warning: ComparisonWarning?
     public init(request: ComparisonRequest, identity: String, title: String, baseRevision: String,
-                targetRevision: String?, files: [FileDiff]) {
+                targetRevision: String?, files: [FileDiff], warning: ComparisonWarning? = nil) {
         self.request = request; self.identity = identity; self.title = title
         self.baseRevision = baseRevision; self.targetRevision = targetRevision; self.files = files
+        self.warning = warning
     }
 }
 
@@ -176,16 +210,33 @@ public enum CommentValidationError: LocalizedError {
 }
 
 public struct ReviewFilters: Codable, Sendable {
+    /// Stored flags express exclusion; include checkboxes display their inverse.
     public var tests: Bool
     public var documentation: Bool
     public var generated: Bool
-    public init(tests: Bool = true, documentation: Bool = true, generated: Bool = true) {
+    public var whitespaceAndImports: Bool
+    public var metaChanges: Bool
+    public init(tests: Bool = true, documentation: Bool = true, generated: Bool = true,
+                whitespaceAndImports: Bool = false, metaChanges: Bool = true) {
         self.tests = tests; self.documentation = documentation; self.generated = generated
+        self.whitespaceAndImports = whitespaceAndImports
+        self.metaChanges = metaChanges
+    }
+    private enum CodingKeys: String, CodingKey { case tests, documentation, generated, whitespaceAndImports, metaChanges }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        tests = try values.decode(Bool.self, forKey: .tests)
+        documentation = try values.decode(Bool.self, forKey: .documentation)
+        generated = try values.decode(Bool.self, forKey: .generated)
+        whitespaceAndImports = try values.decodeIfPresent(Bool.self, forKey: .whitespaceAndImports) ?? false
+        metaChanges = try values.decodeIfPresent(Bool.self, forKey: .metaChanges) ?? true
     }
     public func skipReason(for file: FileDiff) -> String? {
         if file.isBinary { return "Binary file" }
-        if file.isRemovalOnly { return "Removals only" }
-        if file.isFormattingOnly { return "Whitespace only" }
+        if metaChanges && (file.isRemovalOnly || (file.hasMetadataChanges && file.additions == 0 && file.deletions == 0)) {
+            return "Meta changes"
+        }
+        if whitespaceAndImports && file.isWhitespaceAndImportsOnly { return "Whitespace / imports" }
         switch file.category {
         case .tests: return tests ? "Tests" : nil
         case .documentation: return documentation ? "Documentation / non-code" : nil

@@ -6,7 +6,7 @@ final class EmptyReviewTests: XCTestCase {
     @MainActor
     func testHomeUsesFullWindowWithoutReviewControls() throws {
         _ = NSApplication.shared
-        let controller = ReviewWindowController()
+        let controller = ReviewWindowController(github: testGitHubClient())
         let window = try XCTUnwrap(controller.window)
         let content = try XCTUnwrap(window.contentViewController)
         let split = try XCTUnwrap(content.children.compactMap { $0 as? NSSplitViewController }.first)

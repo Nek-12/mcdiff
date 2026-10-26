@@ -19,7 +19,7 @@ final class FinishReviewTests: XCTestCase {
     }
 
     @MainActor
-    func testCopyExportCancelAndArchiveFailureKeepReviewAvailable() async throws {
+    func testParentOutputOperationsCopyAndExportWithActionableFailures() async throws {
         _ = NSApplication.shared
         let pasteboard = NSPasteboard(name: .init(UUID().uuidString))
         defer { pasteboard.releaseGlobally() }
@@ -27,47 +27,52 @@ final class FinishReviewTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let text = "# Review\n\n## source.kt · new · 1\n\nPreserve this comment\n"
-        var attempts = 0
-        var closed: FinishReviewSheet.Completion?
-        let sheet = FinishReviewSheet(text: text, pasteboard: pasteboard, archive: {
-            attempts += 1
-            throw GitError("Storage is not writable")
-        }, onClose: { closed = $0 })
-        let window = try XCTUnwrap(sheet.window)
-        let content = try XCTUnwrap(window.contentView)
-        let labels = descendants(content).compactMap { $0 as? NSTextField }
-        let buttons = descendants(content).compactMap { $0 as? NSButton }
+        try ReviewOutput.copy(text: text, pasteboard: pasteboard)
         XCTAssertEqual(pasteboard.string(forType: .string), text)
         pasteboard.clearContents()
-        sheet.copyAgain()
+        try ReviewOutput.copy(text: text, pasteboard: pasteboard)
         XCTAssertEqual(pasteboard.string(forType: .string), text)
 
-        sheet.export(to: directory.appendingPathComponent("missing/review.md"))
-        try await waitFor { buttons.allSatisfy(\.isEnabled) }
-        XCTAssertTrue(labels.contains { $0.stringValue.contains("Could not export") })
+        do {
+            try await ReviewOutput.export(text: text, to: directory.appendingPathComponent("missing/review.md"))
+            XCTFail("Exporting to a missing directory must fail")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
         let exported = directory.appendingPathComponent("review.md")
-        sheet.export(to: exported)
-        try await waitFor { buttons.allSatisfy(\.isEnabled) }
+        try await ReviewOutput.export(text: text, to: exported)
         XCTAssertEqual(try String(contentsOf: exported, encoding: .utf8), text)
-        XCTAssertNil(closed)
-
-        sheet.finish()
-        XCTAssertTrue(buttons.allSatisfy { !$0.isEnabled })
-        sheet.cancel()
-        XCTAssertNil(closed, "An in-flight archive must settle before dismissal")
-        try await waitFor { buttons.allSatisfy(\.isEnabled) }
-        XCTAssertEqual(attempts, 1)
-        XCTAssertTrue(labels.contains { $0.stringValue.contains("Storage is not writable") })
-        XCTAssertNil(closed)
-        sheet.copyAgain()
-        XCTAssertEqual(pasteboard.string(forType: .string), text)
-        sheet.cancel()
-        XCTAssertEqual(closed, .cancelled)
-        XCTAssertFalse(window.isVisible)
     }
 
     @MainActor
-    func testFinishArchivesAndReopeningComparisonStartsFreshWhileCancelKeepsIt() async throws {
+    func testFinishDialogRendersBusyAndFailureStatesWithoutPerformingWork() throws {
+        _ = NSApplication.shared
+        var actions: [FinishReviewSheet.Action] = []
+        let sheet = FinishReviewSheet { actions.append($0) }
+        let content = try XCTUnwrap(sheet.window?.contentView)
+        let buttons = descendants(content).compactMap { $0 as? NSButton }
+        let labels = descendants(content).compactMap { $0 as? NSTextField }
+        XCTAssertTrue(actions.isEmpty, "Presentation must not copy or archive")
+        sheet.render(message: "Archiving review…", working: true)
+        sheet.finish()
+        sheet.reset()
+        sheet.copyAgain()
+        sheet.cancel()
+        XCTAssertTrue(actions.isEmpty)
+        XCTAssertTrue(buttons.allSatisfy { !$0.isEnabled })
+        sheet.render(message: "Could not archive. Your active review is unchanged.", failed: true)
+        XCTAssertTrue(buttons.allSatisfy(\.isEnabled))
+        XCTAssertTrue(labels.contains { $0.stringValue.contains("Could not archive") && $0.textColor == .systemRed })
+        sheet.copyAgain()
+        sheet.reset()
+        sheet.finish()
+        sheet.cancel()
+        XCTAssertEqual(actions, [.copy, .reset, .finish, .cancel])
+        XCTAssertFalse(try XCTUnwrap(sheet.window).isVisible)
+    }
+
+    @MainActor
+    func testResetClearsMarksButFinishPreservesThemWhenReopeningWhileCancelKeepsComments() async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -90,7 +95,7 @@ final class FinishReviewTests: XCTestCase {
         window.isReleasedWhenClosed = false
         defer { window.delegate = nil; controller.close() }
         controller.start(store: store, arguments: ["--repo", directory.path])
-        try await waitFor { controller.screen == .review }
+        try await waitFor { controller.isReviewReady }
         let pasteboard = NSPasteboard(name: .init(UUID().uuidString))
         defer { pasteboard.releaseGlobally() }
         let cancelled = try XCTUnwrap(controller.prepareFinishReview(pasteboard: pasteboard))
@@ -101,6 +106,25 @@ final class FinishReviewTests: XCTestCase {
         XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).comments, [comment])
 
         let reset = try XCTUnwrap(controller.prepareFinishReview(pasteboard: pasteboard))
+        let blocker = storage.appendingPathComponent("completed-reviews")
+        try Data("blocking archive directory".utf8).write(to: blocker)
+        reset.finish()
+        let resetContent = try XCTUnwrap(reset.window?.contentView)
+        let resetButtons = descendants(resetContent).compactMap { $0 as? NSButton }
+        XCTAssertTrue(resetButtons.allSatisfy { !$0.isEnabled })
+        reset.cancel()
+        XCTAssertNil(controller.prepareFinishReview(pasteboard: pasteboard),
+                     "An in-flight archive must settle before dismissal")
+        try await waitFor {
+            descendants(resetContent).compactMap { $0 as? NSTextField }.contains {
+                $0.stringValue.contains("Could not archive")
+            }
+        }
+        XCTAssertTrue(resetButtons.allSatisfy(\.isEnabled))
+        XCTAssertEqual(controller.screen, .review)
+        XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).comments, [comment])
+        XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed, [file.path: file.fingerprint])
+        try FileManager.default.removeItem(at: blocker)
         reset.reset()
         try await waitFor { controller.validateMenuItem(NSMenuItem(title: "", action: NSSelectorFromString("finishReview"), keyEquivalent: "")) }
         XCTAssertEqual(controller.screen, .review)
@@ -111,12 +135,14 @@ final class FinishReviewTests: XCTestCase {
         XCTAssertTrue(resetView.expanded.contains(file.path))
         XCTAssertFalse(resetView.isReviewed(file))
 
+        resetView.onReviewToggle?(file, true)
+        XCTAssertTrue(resetView.isReviewed(file))
         let finished = try XCTUnwrap(controller.prepareFinishReview(pasteboard: pasteboard))
         finished.finish()
         try await waitFor { controller.screen == .home }
         XCTAssertNil(controller.home.resumeTitle)
         XCTAssertTrue(try store.loadProgress(identity: snapshot.identity).comments.isEmpty)
-        XCTAssertTrue(try store.loadProgress(identity: snapshot.identity).reviewed.isEmpty)
+        XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed, [file.path: file.fingerprint])
         let archives = try FileManager.default.contentsOfDirectory(at: storage.appendingPathComponent("completed-reviews"),
                                                                   includingPropertiesForKeys: nil)
         XCTAssertEqual(archives.count, 2)
@@ -129,7 +155,7 @@ final class FinishReviewTests: XCTestCase {
         XCTAssertEqual(controller.screen, .home, "Finished rounds must not be resumable as active reviews")
 
         controller.start(store: store, arguments: ["--repo", directory.path])
-        try await waitFor { controller.screen == .review }
+        try await waitFor { controller.isReviewReady }
         let toolbar = try XCTUnwrap(window.toolbar)
         let actions = try XCTUnwrap(toolbar.items.compactMap { $0 as? NSToolbarItemGroup }.first {
             $0.subitems.first?.label == "Comments"
@@ -137,8 +163,16 @@ final class FinishReviewTests: XCTestCase {
         let comments = try XCTUnwrap(actions.subitems.first { $0.label == "Comments" })
         XCTAssertEqual(comments.badge, .count(0))
         let view = try XCTUnwrap(descendants(try XCTUnwrap(window.contentView)).compactMap { $0 as? DiffViewport }.first)
-        XCTAssertTrue(view.expanded.contains(file.path))
-        XCTAssertFalse(view.isReviewed(file))
+        XCTAssertFalse(view.expanded.contains(file.path))
+        XCTAssertTrue(view.isReviewed(file))
+        try Data("let value = 2\n".utf8).write(to: directory.appendingPathComponent("source.swift"))
+        controller.start(store: store, arguments: ["--repo", directory.path])
+        try await waitFor { controller.isReviewReady }
+        let changed = try XCTUnwrap(view.files.first)
+        XCTAssertNotEqual(changed.fingerprint, file.fingerprint)
+        XCTAssertFalse(view.isReviewed(changed))
+        XCTAssertTrue(view.expanded.contains(changed.path))
+        XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed, [file.path: file.fingerprint])
         XCTAssertFalse(window.isVisible)
         XCTAssertFalse(cancelled.window!.isVisible)
         XCTAssertFalse(finished.window!.isVisible)

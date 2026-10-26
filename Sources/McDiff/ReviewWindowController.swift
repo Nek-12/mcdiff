@@ -23,11 +23,14 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var sidebarIndices: [Int] = []
     private var sidebarNames: [String: String] = [:]
     private var focused = 0
-    private var loadTask: Task<Void, Never>?
+    let reviewDestination = ReviewDestinationController()
+    var isReviewReady: Bool { screen == .review && reviewDestination.phase == .ready && snapshot != nil }
     private var comparisonSheet: ComparisonSheet?
+    private var branchTask: Task<Void, Never>?
     private var commentEditor: CommentEditorController?
     private let diff = DiffViewport()
-    private let sidebar = NSTableView()
+    private let comparisonWarning = ComparisonWarningView()
+    private let sidebar = ReviewSidebarTableView()
     private let search = NSSearchField()
     private let searchItem = NSSearchToolbarItem(itemIdentifier: .init("search"))
     private var searchMatchingFiles: Set<Int>?
@@ -37,6 +40,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private var refreshButton: NSToolbarItem!
     private var commentsButton: NSToolbarItem!
     private var finishSheet: FinishReviewSheet?
+    private var finishTask: Task<Void, Never>?
     private var wrapButton: NSToolbarItem!
     private var layoutButton: NSToolbarItem!
     private let splitController = NSSplitViewController()
@@ -51,15 +55,22 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         .init("welcomeSources"), .init("homeRefresh"), .init("status"), .flexibleSpace,
         .init("pr-home-search"), .space, .init("account")
     ]
+    private let loadingToolbarOrder: [NSToolbarItem.Identifier] = [
+        .init("home"), .init("status"), .flexibleSpace
+    ]
     private let testsFilter = AnimatedCheckbox(checkboxWithTitle: "Tests", target: nil, action: nil)
-    private let docsFilter = AnimatedCheckbox(checkboxWithTitle: "Documentation / non-code", target: nil, action: nil)
-    private let noiseFilter = AnimatedCheckbox(checkboxWithTitle: "Generated / noise", target: nil, action: nil)
+    private let docsFilter = AnimatedCheckbox(checkboxWithTitle: "Documentation and non-code", target: nil, action: nil)
+    private let noiseFilter = AnimatedCheckbox(checkboxWithTitle: "Generated and noise", target: nil, action: nil)
+    private let whitespaceAndImportsFilter = AnimatedCheckbox(checkboxWithTitle: "Whitespace and imports", target: nil, action: nil)
+    private let metaChangesFilter = AnimatedCheckbox(checkboxWithTitle: "Meta changes", target: nil, action: nil)
     private enum Activity { case comparison, layout, search, account }
     private var activities: Set<Activity> = []
-    private var busy: Bool { activities.contains(.comparison) || finishSheet != nil }
+    private var busy: Bool {
+        (screen == .review && reviewDestination.phase != .ready) || finishSheet != nil
+    }
     private var statusDismissal: DispatchWorkItem?
 
-    init(github: GitHubClient = GitHubClient(clientID: Bundle.main.object(forInfoDictionaryKey: "GitHubOAuthClientID") as? String ?? "")) {
+    init(github: GitHubClient) {
         self.github = github
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 940),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -226,7 +237,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         updateActions()
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        screen == .home ? emptyToolbarOrder : toolbarOrder
+        screen == .home ? emptyToolbarOrder : (isReviewReady ? toolbarOrder : loadingToolbarOrder)
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarOrder + emptyToolbarOrder
@@ -234,12 +245,14 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? { toolbarItems[itemIdentifier] }
     private func updateComparisonPresentation() {
         let hasComparison = screen == .review
-        splitController.splitViewItems.first?.isCollapsed = snapshot == nil
+        splitController.splitViewItems.first?.isCollapsed = !isReviewReady || files.isEmpty
         splitController.view.isHidden = !hasComparison
         home.view.isHidden = hasComparison
-        diff.isHidden = !hasComparison
+        diff.isHidden = !isReviewReady || files.isEmpty
+        comparisonWarning.configure(snapshot: isReviewReady ? snapshot : nil)
+        reviewDestination.view.isHidden = !hasComparison || (isReviewReady && !files.isEmpty)
         guard let toolbar = window?.toolbar else { return }
-        let order = hasComparison ? toolbarOrder : emptyToolbarOrder
+        let order = hasComparison ? (isReviewReady ? toolbarOrder : loadingToolbarOrder) : emptyToolbarOrder
         guard toolbar.items.map(\.itemIdentifier) != order else { return }
         for index in toolbar.items.indices.reversed() { toolbar.removeItem(at: index) }
         for (index, identifier) in order.enumerated() {
@@ -265,6 +278,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         ]
         for (title, action, key) in entries {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            if action == #selector(finishReview) { item.keyEquivalentModifierMask = .control }
             item.target = self
         }
         for (title, action, key) in [("Previous file", #selector(previousFile), "\u{f700}"), ("Next file", #selector(nextFile), "\u{f701}")] {
@@ -302,35 +316,66 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         return content
     }
     private func buildFilters() -> NSView {
-        let filters = Style.stack([testsFilter, docsFilter, noiseFilter], orientation: .vertical, spacing: 7)
-        for button in [testsFilter, docsFilter, noiseFilter] {
+        let buttons = [testsFilter, docsFilter, noiseFilter, whitespaceAndImportsFilter, metaChangesFilter]
+        let filters = Style.stack(buttons, orientation: .vertical, spacing: 7)
+        for button in buttons {
             button.font = .systemFont(ofSize: 12)
             button.target = self; button.action = #selector(filtersChanged)
-            button.toolTip = "Automatically collapse and mark reviewed. Remembered globally; files remain expandable."
+            button.toolTip = "Include these files in review. Uncheck to automatically collapse and mark reviewed. Remembered globally; files remain expandable."
         }
+        whitespaceAndImportsFilter.toolTip = "Show whitespace and import changes with full emphasis. Uncheck to ignore whitespace outside strings, imports, and package declarations, and automatically collapse and mark files reviewed when only those change. Remembered globally; files remain expandable."
+        metaChangesFilter.toolTip = "Include deleted and removal-only files, and renames, copies, modes, or other metadata without content edits. Uncheck to automatically collapse and mark reviewed. Binary files remain automatically reviewed. Remembered globally; files remain expandable."
         let view = NSView()
         Style.pin(filters, in: view, inset: 12)
         return view
     }
     private func buildMain() -> NSView {
         let main = NSView()
-        diff.translatesAutoresizingMaskIntoConstraints = false; main.addSubview(diff)
+        let content = NSView()
+        let stack = Style.stack([comparisonWarning, content], orientation: .vertical, spacing: 0)
+        stack.detachesHiddenViews = true
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        main.addSubview(stack)
+        diff.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(diff)
         NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: main.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: main.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: main.bottomAnchor),
+            comparisonWarning.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            content.widthAnchor.constraint(equalTo: stack.widthAnchor),
             // Match the native toolbar group's eight-point inset after the tracking separator.
-            diff.leadingAnchor.constraint(equalTo: main.safeAreaLayoutGuide.leadingAnchor, constant: 8),
-            diff.trailingAnchor.constraint(equalTo: main.safeAreaLayoutGuide.trailingAnchor),
-            diff.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),
-            diff.bottomAnchor.constraint(equalTo: main.bottomAnchor)
+            diff.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            diff.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            diff.topAnchor.constraint(equalTo: content.topAnchor),
+            diff.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
+        Style.pin(reviewDestination.view, in: content)
         return main
     }
     private func configureCallbacks() {
+        reviewDestination.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.setActivity(.comparison, active: self.screen == .review && self.reviewDestination.phase == .loading)
+            self.updateComparisonPresentation()
+            self.updateActions()
+        }
+        reviewDestination.onHome = { [weak self] in self?.showHome() }
         home.onOpenPR = { [weak self] in self?.openPR($0) }
         home.onResume = { [weak self] in self?.resumeReview() }
         home.onAuthenticationRequired = { [weak self] in self?.setAccount(.signedOut) }
         diff.isReviewed = { [weak self] in self?.isReviewed($0) ?? false }
         diff.onReviewToggle = { [weak self] file, reviewed in self?.setReviewed(file, reviewed: reviewed) }
-        diff.onFocus = { [weak self] in self?.focus($0) }
+        sidebar.onToggleReviewed = { [weak self] in
+            guard let self, self.sidebarIndices.indices.contains(self.sidebar.selectedRow) else { return }
+            let file = self.files[self.sidebarIndices[self.sidebar.selectedRow]]
+            self.setReviewed(file, reviewed: !self.isReviewed(file))
+        }
+        diff.onFinishReview = { [weak self] in self?.finishReview() }
+        diff.onFocus = { [weak self] index in
+            guard let self, self.isReviewReady else { return }
+            self.focus(index)
+        }
         diff.onComment = { [weak self] in self?.editComment(selection: $0) }
         diff.onSearchResults = { [weak self] indices, count in
             guard let self else { return }
@@ -341,149 +386,195 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         diff.onSearchBusy = { [weak self] searching in
             self?.setActivity(.search, active: searching)
         }
-        diff.onHighlightError = { [weak self] error in self?.showError(error, title: "Could not highlight code") }
+        diff.onHighlightError = { [weak self] error in
+            guard let self, self.isReviewReady else {
+                NSLog("Could not highlight inactive review: %@", error.localizedDescription)
+                return
+            }
+            self.showError(error, title: "Could not highlight code")
+        }
         diff.onLayoutBusy = { [weak self] busy in
             self?.setActivity(.layout, active: busy)
         }
     }
     @objc private func openComparison() {
         guard let window, !busy, window.attachedSheet == nil, settleDraft() else { return }
-        comparisonSheet = ComparisonSheet(recent: snapshot?.request ?? preferences.recentComparisons.first) { [weak self] url, request in
-            if let url { self?.openPR(url) } else if let request { self?.load(request) }
+        let recent = snapshot?.request ?? preferences.recentComparisons.first
+        let clipboard = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clipboardURL = clipboard.flatMap { try? GitHubPR.parse($0).url }
+        comparisonSheet = ComparisonSheet(recent: recent, clipboardURL: clipboardURL) { [weak self] action in
+            self?.handleComparisonAction(action)
         }
         comparisonSheet?.present(on: window)
+        if let recent { loadComparisonBranches(path: recent.repository, chooseDefault: false) }
+    }
+    private func handleComparisonAction(_ action: ComparisonSheet.Action) {
+        guard let sheet = comparisonSheet, let sheetWindow = sheet.window else { return }
+        switch action {
+        case .cancel:
+            branchTask?.cancel()
+            branchTask = nil
+            sheet.dismiss()
+            comparisonSheet = nil
+        case .chooseRepository:
+            let picker = NSOpenPanel()
+            picker.canChooseDirectories = true
+            picker.canChooseFiles = false
+            picker.allowsMultipleSelection = false
+            picker.message = "Select the Git checkout or worktree to review."
+            picker.beginSheetModal(for: sheetWindow) { [weak self, weak sheet] response in
+                guard let self, let sheet, self.comparisonSheet === sheet,
+                      response == .OK, let path = picker.url?.path else { return }
+                sheet.setRepository(path: path)
+                self.loadComparisonBranches(path: path, chooseDefault: true)
+            }
+        case .open(let input):
+            do {
+                let resolved = try input.resolve()
+                branchTask?.cancel()
+                branchTask = nil
+                sheet.dismiss()
+                comparisonSheet = nil
+                if let url = resolved.url { openPR(url) }
+                else if let request = resolved.request { load(request) }
+            } catch { sheet.showStatus(error.localizedDescription, failed: true) }
+        }
+    }
+    private func loadComparisonBranches(path: String, chooseDefault: Bool) {
+        guard let sheet = comparisonSheet else { return }
+        branchTask?.cancel()
+        sheet.showStatus("Reading branches…")
+        branchTask = Task { [weak self, weak sheet] in
+            do {
+                let branches = try await ComparisonBranches.load(path: path)
+                guard let self, let sheet, !Task.isCancelled, self.comparisonSheet === sheet else { return }
+                sheet.setBranches(branches, chooseDefault: chooseDefault)
+                self.branchTask = nil
+            } catch {
+                guard let self, let sheet, !Task.isCancelled, self.comparisonSheet === sheet else { return }
+                self.branchTask = nil
+                sheet.showStatus("Could not read branches: \(error.localizedDescription) Choose the checkout again to retry.", failed: true)
+            }
+        }
     }
     func openPR(_ url: String) {
-        guard !busy, window?.attachedSheet == nil, settleDraft() else { return }
+        guard window?.attachedSheet == nil, finishSheet == nil, settleDraft() else { return }
         do {
             let pr = try GitHubPR.parse(url)
-            switch account {
-            case .checking:
-                pendingPR = pr.url
-                return
-            case .signedOut:
-                pendingPR = pr.url
-                signIn()
-                return
-            case .failed:
-                pendingPR = pr.url
-                bootstrapAccount()
-                return
-            case .signedIn: break
-            }
-            let key = pr.repositoryKey.lowercased()
-            if let local = preferences.repositoryMappings[key], FileManager.default.fileExists(atPath: local) {
-                resolvePR(pr, local: local)
-            } else { choosePRCheckout(pr) }
+            navigateToReview(.pullRequest(pr))
+            continuePR(pr)
         } catch { showError(error, title: "Cannot open pull request") }
     }
+    private func navigateToReview(_ intent: ReviewIntent) {
+        pendingPR = nil
+        Style.animateStateChange(window?.contentView)
+        screen = .review
+        reviewDestination.enter(intent)
+        updateComparisonPresentation()
+        window?.makeFirstResponder(reviewDestination.view)
+    }
+    private func continuePR(_ pr: GitHubPR) {
+        guard screen == .review, reviewDestination.intent == .pullRequest(pr) else { return }
+        switch account {
+        case .checking:
+            pendingPR = pr.url
+            reviewDestination.wait("Checking GitHub sign-in…")
+            return
+        case .signedOut:
+            pendingPR = pr.url
+            reviewDestination.wait("Sign in to GitHub to open this pull request.", actionTitle: "Sign in") { [weak self] in
+                self?.pendingPR = pr.url
+                self?.signIn()
+            }
+            signIn()
+            return
+        case .failed:
+            pendingPR = pr.url
+            reviewDestination.fail("Could not check GitHub sign-in.", actionTitle: "Retry") { [weak self] in self?.bootstrapAccount() }
+            return
+        case .signedIn: break
+        }
+        if let local = preferences.repositoryMappings[pr.repositoryKey.lowercased()],
+           FileManager.default.fileExists(atPath: local) {
+            resolvePR(pr, local: local)
+        } else {
+            reviewDestination.wait("Choose the existing local checkout for \(pr.repositoryKey).",
+                                   actionTitle: "Choose checkout…") { [weak self] in self?.choosePRCheckout(pr) }
+            choosePRCheckout(pr)
+        }
+    }
     private func choosePRCheckout(_ pr: GitHubPR) {
-        guard let window else { return }
+        guard let window, window.attachedSheet == nil else { return }
         let picker = NSOpenPanel()
         picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.allowsMultipleSelection = false
         picker.message = "Where is \(pr.repositoryKey) checked out? McDiff will remember this folder."
         picker.prompt = "Use checkout"
         picker.beginSheetModal(for: window) { [weak self] result in
-            if result == .OK, let path = picker.url?.path { self?.resolvePR(pr, local: path) }
+            guard let self, result == .OK, let path = picker.url?.path else { return }
+            if self.screen != .review || self.reviewDestination.intent != .pullRequest(pr) {
+                self.navigateToReview(.pullRequest(pr))
+            }
+            self.resolvePR(pr, local: path)
         }
     }
     private func resolvePR(_ pr: GitHubPR, local: String) {
-        guard !busy else { return }
-        setBusy(true, message: "Fetching PR metadata and missing Git objects…")
-        loadTask = Task { [weak self] in
-            do {
-                guard let self else { return }
-                let revisions = try await self.github.revisions(for: pr)
-                let request = try await Task.detached(priority: .userInitiated) {
-                    try pr.resolve(localRepository: local, revisions: revisions)
-                }.value
-                self.preferences.repositoryMappings[pr.repositoryKey.lowercased()] = local
-                try self.savePreferences()
-                self.setBusy(false)
-                self.load(request)
-            } catch {
-                guard let self else { return }
-                self.setBusy(false)
-                if case GitHubError.unauthenticated = error {
-                    self.setAccount(.signedOut)
-                    self.pendingPR = pr.url
-                    self.signIn()
-                } else if error is GitHubError {
-                    self.showError(error, title: "Cannot load pull request", recovery: "Retry") { self.resolvePR(pr, local: local) }
-                } else {
-                    self.showError(error, title: "Cannot load \(pr.repositoryKey)", recovery: "Choose checkout…") { self.choosePRCheckout(pr) }
-                }
-            }
-        }
-    }
-    private func load(_ request: ComparisonRequest) {
-        guard !busy, let store, settleDraft() else { return }
-        setBusy(true, message: "Reading Git changes…")
-        let start = ContinuousClock.now
+        guard let store, screen == .review, reviewDestination.intent == .pullRequest(pr) else { return }
         let previousPath = files.indices.contains(focused) ? files[focused].path : nil
-        loadTask = Task { [weak self] in
-            do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    let snapshot = try GitRepository(path: request.repository).load(request)
-                    let progress = try store.loadProgress(identity: snapshot.identity)
-                    let git = GitRepository(path: request.repository)
-                    let presentation = Dictionary(uniqueKeysWithValues: snapshot.files.map {
-                        ($0.path, DiffPresentation.rows(for: $0))
-                    })
-                    var markdown: [String: MarkdownFileContent] = [:]
-                    for file in snapshot.files where RenderedMarkdown.accepts(file.path) && !file.isBinary {
-                        do {
-                            markdown[file.path] = try MarkdownFileContent(old: git.content(snapshot: snapshot, file: file, side: .old),
-                                                                          new: git.content(snapshot: snapshot, file: file, side: .new))
-                        } catch {
-                            markdown[file.path] = MarkdownFileContent(old: nil, new: nil, error: error.localizedDescription)
-                        }
-                    }
-                    return (snapshot, progress, presentation, markdown)
-                }.value
-                guard let self else { return }
-                self.snapshot = result.0; self.progress = result.1
-                self.search.placeholderString = Self.searchPlaceholder(for: result.0)
-                self.search.toolTip = "\(result.0.title)\nSearch paths and displayed text (⌘F)"
-                self.searchItem.toolTip = self.search.toolTip
-                self.screen = .review
-                self.home.resumeTitle = result.0.title
-                self.sortFiles()
-                self.diff.expanded = Set(self.files.filter { self.preferences.filters.skipReason(for: $0) == nil && !self.isReviewed($0) }.map(\.path))
-                self.diff.filters = self.preferences.filters
-                self.diff.markdownContent = result.3
-                self.searchMatchingFiles = nil
-                self.diff.setComments(self.progress.comments)
-                let contextSource = ContextSource(snapshot: result.0)
-                self.diff.contexts.resolve = { file in try await contextSource.presentation(file: file) }
-                self.diff.contexts.load = { file, section in
-                    try await contextSource.lines(file: file, section: section)
-                }
-                self.diff.setFiles(self.files, presentations: result.2)
-                self.rebuildSidebar()
-                self.updateComparisonPresentation()
-                self.window?.title = "McDiff — \(result.0.title)"
-                self.preferences.recentComparisons.removeAll { $0 == request || ($0.pullRequestURL != nil && $0.pullRequestURL == request.pullRequestURL) }
-                self.preferences.recentComparisons.insert(request, at: 0)
-                self.preferences.recentComparisons = Array(self.preferences.recentComparisons.prefix(12))
-                try self.savePreferences()
-                self.setBusy(false)
-                let elapsed = ContinuousClock.now - start
-                if self.files.isEmpty { self.showStatus("No changes in this comparison.") }
-                NSLog("McDiff loaded %d files in %@ ms", self.files.count, Self.milliseconds(elapsed))
-                let index = previousPath.flatMap { path in self.files.firstIndex { $0.path == path } } ?? 0
-                if !self.files.isEmpty { self.diff.navigate(to: index, expand: false); self.focus(index) }
-                self.updateActions()
-            } catch {
-                guard let self else { return }
-                self.setBusy(false)
-                self.showError(error, title: "Could not load comparison", recovery: "Retry") { self.load(request) }
+        reviewDestination.load(store: store, github: github, checkout: local, accept: { [weak self] review in
+            guard let self else { return }
+            try self.installReview(review, previousPath: previousPath, mapping: (pr.repositoryKey.lowercased(), local))
+        }, failureAction: { [weak self] error in
+            if case GitHubError.unauthenticated = error {
+                return ("Sign in", {
+                    self?.setAccount(.signedOut)
+                    self?.pendingPR = pr.url
+                    self?.signIn()
+                })
             }
-        }
+            if error is GitError { return ("Choose checkout…", { self?.choosePRCheckout(pr) }) }
+            return ("Retry", { self?.resolvePR(pr, local: local) })
+        })
     }
-    private static func milliseconds(_ duration: Duration) -> String {
-        let components = duration.components
-        return String(format: "%.0f", Double(components.seconds) * 1000 + Double(components.attoseconds) / 1e15)
+    func load(_ request: ComparisonRequest) {
+        guard let store, window?.attachedSheet == nil, finishSheet == nil, settleDraft() else { return }
+        let previousPath = files.indices.contains(focused) ? files[focused].path : nil
+        navigateToReview(.local(request))
+        reviewDestination.load(store: store, github: github, accept: { [weak self] review in
+            try self?.installReview(review, previousPath: previousPath)
+        })
+    }
+    private func installReview(_ review: PreparedReview, previousPath: String?, mapping: (String, String)? = nil) throws {
+        let request = review.snapshot.request
+        var updated = preferences
+        if let mapping { updated.repositoryMappings[mapping.0] = mapping.1 }
+        updated.recentComparisons.removeAll { $0 == request || ($0.pullRequestURL != nil && $0.pullRequestURL == request.pullRequestURL) }
+        updated.recentComparisons.insert(request, at: 0)
+        updated.recentComparisons = Array(updated.recentComparisons.prefix(12))
+        try store?.savePreferences(updated)
+        preferences = updated
+        snapshot = review.snapshot
+        progress = review.progress
+        search.stringValue = ""
+        search.placeholderString = Self.searchPlaceholder(for: review.snapshot)
+        search.toolTip = "\(review.snapshot.title)\nSearch paths and displayed text (⌘F)"
+        searchItem.toolTip = search.toolTip
+        home.resumeTitle = review.snapshot.title
+        sortFiles()
+        diff.expanded = Set(files.filter { preferences.filters.skipReason(for: $0) == nil && !isReviewed($0) }.map(\.path))
+        diff.filters = preferences.filters
+        diff.markdownContent = review.markdown
+        searchMatchingFiles = nil
+        diff.setComments(progress.comments)
+        let contextSource = ContextSource(snapshot: review.snapshot)
+        diff.contexts.resolve = { file in try await contextSource.presentation(file: file) }
+        diff.contexts.load = { file, section in try await contextSource.lines(file: file, section: section) }
+        diff.setFiles(files, presentations: review.presentations)
+        diff.search(query: "")
+        rebuildSidebar()
+        window?.title = "McDiff — \(review.snapshot.title)"
+        let index = previousPath.flatMap { path in files.firstIndex { $0.path == path } } ?? 0
+        if !files.isEmpty { diff.navigate(to: index, expand: false); focus(index) }
+        if files.isEmpty { showStatus("No changes in this comparison.") }
     }
     private func sortFiles() {
         files = (snapshot?.files ?? []).sorted {
@@ -493,9 +584,12 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         sidebarNames = SidebarFileNames.labels(for: files.map(\.path))
     }
     private func rank(_ file: FileDiff) -> Int {
-        if preferences.filters.skipReason(for: file) == nil, file.category == .production { return 0 }
-        if file.isBinary || file.isRemovalOnly || file.isFormattingOnly { return 1 }
-        switch file.category { case .production: return 0; case .tests: return 2; case .documentation: return 3; case .generated: return 4 }
+        switch file.category {
+        case .production: return preferences.filters.skipReason(for: file) == nil ? 0 : 1
+        case .tests: return 2
+        case .documentation: return 3
+        case .generated: return 4
+        }
     }
     private func isReviewed(_ file: FileDiff) -> Bool {
         preferences.filters.skipReason(for: file) != nil || progress.reviewed[file.path] == file.fingerprint
@@ -516,18 +610,15 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             item.isEnabled = hasFile && !busy
         }
         finishButton?.isEnabled = snapshot != nil && !busy
+        diff.finishReviewEnabled = isReviewReady && !busy
         refreshButton?.isEnabled = snapshot != nil && !busy
-        commentsButton?.toolTip = "\(progress.comments.count) comments"
-        commentsButton?.badge = .count(progress.comments.count)
+        let commentCount = isReviewReady ? progress.comments.count : 0
+        commentsButton?.toolTip = "\(commentCount) comments"
+        commentsButton?.badge = .count(commentCount)
         commentsButton?.isEnabled = !progress.comments.isEmpty && !busy
         wrapButton?.isEnabled = !busy
         layoutButton?.isEnabled = snapshot != nil && !busy
-    }
-    private func setBusy(_ value: Bool, message: String? = nil) {
-        setActivity(.comparison, active: value)
-        statusDismissal?.cancel()
-        spinner.toolTip = message
-        updateActions()
+        searchItem.isEnabled = isReviewReady
     }
     private func setActivity(_ activity: Activity, active: Bool) {
         if active { activities.insert(activity) } else { activities.remove(activity) }
@@ -546,13 +637,17 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: dismissal)
     }
     private func updateFilters() {
-        testsFilter.state = preferences.filters.tests ? .on : .off
-        docsFilter.state = preferences.filters.documentation ? .on : .off
-        noiseFilter.state = preferences.filters.generated ? .on : .off
+        testsFilter.state = preferences.filters.tests ? .off : .on
+        docsFilter.state = preferences.filters.documentation ? .off : .on
+        noiseFilter.state = preferences.filters.generated ? .off : .on
+        whitespaceAndImportsFilter.state = preferences.filters.whitespaceAndImports ? .off : .on
+        metaChangesFilter.state = preferences.filters.metaChanges ? .off : .on
     }
     @objc private func filtersChanged() {
         let previous = preferences.filters
-        preferences.filters = ReviewFilters(tests: testsFilter.state == .on, documentation: docsFilter.state == .on, generated: noiseFilter.state == .on)
+        preferences.filters = ReviewFilters(tests: testsFilter.state == .off, documentation: docsFilter.state == .off,
+                                            generated: noiseFilter.state == .off, whitespaceAndImports: whitespaceAndImportsFilter.state == .off,
+                                            metaChanges: metaChangesFilter.state == .off)
         do { try savePreferences() } catch { preferences.filters = previous; updateFilters(); showError(error, title: "Could not save filters"); return }
         Style.animateStateChange(sidebar.enclosingScrollView?.contentView)
         let path = files.indices.contains(focused) ? files[focused].path : nil
@@ -639,6 +734,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         updateActions()
     }
     private func setReviewed(_ file: FileDiff, reviewed: Bool) {
+        guard isReviewReady, !busy, preferences.filters.skipReason(for: file) == nil else { return }
         let prior = progress
         if reviewed { progress.reviewed[file.path] = file.fingerprint }
         else { progress.reviewed.removeValue(forKey: file.path) }
@@ -671,8 +767,14 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             }
             return
         }
-        guard let request = snapshot?.request else { return }
-        if let url = request.pullRequestURL { openPR(url) } else { load(request) }
+        if !isReviewReady, let intent = reviewDestination.intent {
+            switch intent {
+            case .local(let request): load(request)
+            case .pullRequest(let pr): openPR(pr.url)
+            }
+        } else if let request = snapshot?.request {
+            if let url = request.pullRequestURL { openPR(url) } else { load(request) }
+        }
     }
     private func editComment(selection: LineSelection) {
         guard screen == .review, !busy, files.indices.contains(selection.file) else { return }
@@ -735,21 +837,72 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         guard screen == .review, !busy, let snapshot, let store, let window,
               window.attachedSheet == nil, settleDraft() else { return nil }
         let text = ReviewExport.markdown(snapshot: snapshot, progress: progress)
-        let sheet = FinishReviewSheet(text: text, pasteboard: pasteboard, archive: {
-            _ = try await Task.detached { try store.finishReview(snapshot: snapshot) }.value
-        }, onClose: { [weak self] completion in
-            guard let self else { return }
-            self.finishSheet = nil
-            switch completion {
-            case .cancelled: break
-            case .reset: self.resetCompletedReview()
-            case .finished: self.clearCompletedReview()
-            }
-            self.updateActions()
-        })
+        let sheet = FinishReviewSheet { [weak self] action in
+            self?.handleFinishAction(action, text: text, pasteboard: pasteboard, snapshot: snapshot, store: store)
+        }
         finishSheet = sheet
+        handleFinishAction(.copy, text: text, pasteboard: pasteboard, snapshot: snapshot, store: store)
         updateActions()
         return sheet
+    }
+    private func handleFinishAction(_ action: FinishReviewSheet.Action, text: String, pasteboard: NSPasteboard,
+                                    snapshot: ReviewSnapshot, store: ReviewStore) {
+        guard let sheet = finishSheet, finishTask == nil, sheet.window?.attachedSheet == nil else { return }
+        switch action {
+        case .copy:
+            do {
+                try ReviewOutput.copy(text: text, pasteboard: pasteboard)
+                sheet.render(message: "Review copied to clipboard.")
+            } catch { sheet.render(message: error.localizedDescription, failed: true) }
+        case .cancel:
+            closeFinishSheet(.cancelled)
+        case .export:
+            guard let window = sheet.window else { return }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "review.md"
+            panel.allowedContentTypes = [.plainText]
+            panel.canCreateDirectories = true
+            panel.beginSheetModal(for: window) { [weak self, weak sheet] response in
+                guard let self, let sheet, self.finishSheet === sheet,
+                      response == .OK, let url = panel.url else { return }
+                sheet.render(message: "Exporting review…", working: true)
+                self.finishTask = Task { [weak self, weak sheet] in
+                    do {
+                        try await ReviewOutput.export(text: text, to: url)
+                        sheet?.render(message: "Exported \(url.lastPathComponent).")
+                    } catch {
+                        sheet?.render(message: "Could not export: \(error.localizedDescription) Try Export again.", failed: true)
+                    }
+                    self?.finishTask = nil
+                }
+            }
+        case .reset, .finish:
+            sheet.render(message: "Archiving review…", working: true)
+            let completion: FinishReviewSheet.Completion = action == .reset ? .reset : .finished
+            finishTask = Task { [weak self, weak sheet] in
+                do {
+                    _ = try await Task.detached {
+                        if action == .reset { return try store.resetReview(snapshot: snapshot) }
+                        return try store.finishReview(snapshot: snapshot)
+                    }.value
+                    self?.finishTask = nil
+                    self?.closeFinishSheet(completion)
+                } catch {
+                    self?.finishTask = nil
+                    sheet?.render(message: "Could not archive: \(error.localizedDescription) Your active review is unchanged. Try again.", failed: true)
+                }
+            }
+        }
+    }
+    private func closeFinishSheet(_ completion: FinishReviewSheet.Completion) {
+        finishSheet?.dismiss()
+        finishSheet = nil
+        switch completion {
+        case .cancelled: break
+        case .reset: resetCompletedReview()
+        case .finished: clearCompletedReview()
+        }
+        updateActions()
     }
     static func searchPlaceholder(for snapshot: ReviewSnapshot) -> String {
         if let url = snapshot.request.pullRequestURL, let pr = try? GitHubPR.parse(url) {
@@ -773,6 +926,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if files.indices.contains(currentFile) { diff.navigate(to: currentFile, expand: false) }
     }
     private func clearCompletedReview() {
+        reviewDestination.cancel()
         snapshot = nil
         progress = ReviewProgress()
         commentEditor = nil
@@ -822,6 +976,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if let url = request.pullRequestURL { openPR(url) } else { load(request) }
     }
     @objc private func findInReview() {
+        guard screen == .home || isReviewReady else { return }
         (screen == .home ? home.searchItem : searchItem).beginSearchInteraction()
     }
 
@@ -831,15 +986,20 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     }
 
     @objc func showHome() {
-        guard !busy, window?.attachedSheet == nil, settleDraft() else { return }
+        guard finishSheet == nil, window?.attachedSheet == nil, settleDraft() else { return }
+        Style.animateStateChange(window?.contentView)
         screen = .home
+        pendingPR = nil
+        reviewDestination.cancel()
         updateComparisonPresentation()
         window?.makeFirstResponder(home.table)
     }
 
     func resumeReview() {
         guard snapshot != nil, !busy, window?.attachedSheet == nil, settleDraft() else { return }
+        Style.animateStateChange(window?.contentView)
         screen = .review
+        reviewDestination.resume(isEmpty: files.isEmpty)
         updateComparisonPresentation()
         window?.makeFirstResponder(diff)
     }
@@ -847,6 +1007,9 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     func bootstrapAccount() {
         guard accountTask == nil else { return }
         setAccount(.checking)
+        if pendingPR != nil, screen == .review, case .pullRequest = reviewDestination.intent {
+            reviewDestination.wait("Checking GitHub sign-in…")
+        }
         accountTask = Task { [weak self, github] in
             do {
                 let user = try await github.currentUser()
@@ -863,6 +1026,10 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 } else {
                     self.setAccount(.failed)
                     self.home.setUnavailable("Couldn’t check GitHub sign-in. Refresh to retry.\n\(error.localizedDescription)")
+                    if self.screen == .review, case .pullRequest = self.reviewDestination.intent {
+                        self.reviewDestination.fail("Couldn’t check GitHub sign-in.\n\(error.localizedDescription)",
+                                                    actionTitle: "Retry") { [weak self] in self?.bootstrapAccount() }
+                    }
                 }
             }
         }
@@ -911,19 +1078,24 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
                 try Task.checkCancellation()
                 guard let response = response as? HTTPURLResponse, response.statusCode == 200,
                       let image = NSImage(data: data) else { throw GitHubError.invalidResponse }
-                let size = NSSize(width: Icons.toolbarPointSize, height: Icons.toolbarPointSize)
-                let circular = NSImage(size: size, flipped: false) { rect in
-                    NSBezierPath(ovalIn: rect).addClip()
-                    image.draw(in: rect)
-                    return true
-                }
-                circular.isTemplate = false
-                self?.toolbarItems[.init("account")]?.image = circular
+                self?.toolbarItems[.init("account")]?.image = Self.toolbarAvatar(from: image)
             } catch is CancellationError {
             } catch {
                 NSLog("Could not load GitHub avatar: %@", error.localizedDescription)
             }
         }
+    }
+
+    static func toolbarAvatar(from image: NSImage) -> NSImage {
+        // 24 points is the largest image that preserves the native circular toolbar button.
+        let size = NSSize(width: 24, height: 24)
+        let circular = NSImage(size: size, flipped: false) { rect in
+            NSBezierPath(ovalIn: rect).addClip()
+            image.draw(in: rect)
+            return true
+        }
+        circular.isTemplate = false
+        return circular
     }
 
     private func signIn() {
@@ -943,7 +1115,8 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
     private func continuePendingPR() {
         guard let url = pendingPR else { return }
         pendingPR = nil
-        openPR(url)
+        guard screen == .review, case .pullRequest(let pr) = reviewDestination.intent, pr.url == url else { return }
+        continuePR(pr)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -952,18 +1125,23 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
             return screen == .home && !busy && window?.attachedSheet == nil
         case #selector(refresh):
             return !busy && window?.attachedSheet == nil
-        case #selector(findInReview): return true
+        case #selector(findInReview): return screen == .home || isReviewReady
+        case #selector(finishReview):
+            return isReviewReady && !busy && !(window?.firstResponder is NSTextView)
+                && !(NSApp.keyWindow?.firstResponder is NSTextView)
         case #selector(paste(_:)):
-            return !busy && window?.attachedSheet == nil && PRDropView.pullRequest(from: .general) != nil
+            return finishSheet == nil && window?.attachedSheet == nil && PRDropView.pullRequest(from: .general) != nil
+        case #selector(showHome):
+            return finishSheet == nil && window?.attachedSheet == nil
         default: return screen == .review && snapshot != nil && !busy
         }
     }
     func controlTextDidChange(_ obj: Notification) {
-        guard obj.object as? NSSearchField === search else { return }
+        guard isReviewReady, obj.object as? NSSearchField === search else { return }
         diff.search(query: search.stringValue)
     }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard control === search, commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        guard isReviewReady, control === search, commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
         diff.nextSearchMatch(backwards: NSApp.currentEvent?.modifierFlags.contains(.shift) == true)
         return true
     }
@@ -982,6 +1160,7 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         return cell
     }
     @objc private func sidebarSelected() {
+        guard isReviewReady, !busy else { return }
         let row = sidebar.selectedRow
         if sidebarIndices.indices.contains(row) { diff.navigate(to: sidebarIndices[row], animated: true) }
     }
@@ -994,6 +1173,19 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if let recovery { alert.addButton(withTitle: recovery) }
         for button in alert.buttons { button.bezelStyle = .glass }
         alert.beginSheetModal(for: window) { response in if response == .alertSecondButtonReturn { action?() } }
+    }
+}
+
+private final class ReviewSidebarTableView: NSTableView {
+    var onToggleReviewed: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers.isEmpty, [" ", "\r", "\u{3}"].contains(event.charactersIgnoringModifiers ?? "") {
+            onToggleReviewed?()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
 

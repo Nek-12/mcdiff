@@ -1,4 +1,5 @@
 import AppKit
+import McDiffCore
 
 @main
 enum McDiffApp {
@@ -32,7 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit; menu.addItem(editItem)
         NSApp.mainMenu = menu
-        controller = ReviewWindowController()
+        controller = ReviewWindowController(github: GitHubClient(
+            clientID: Bundle.main.object(forInfoDictionaryKey: "GitHubOAuthClientID") as? String ?? ""))
         controller?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         controller?.start()

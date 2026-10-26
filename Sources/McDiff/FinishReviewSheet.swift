@@ -2,19 +2,15 @@ import AppKit
 
 final class FinishReviewSheet: NSWindowController {
     enum Completion { case cancelled, reset, finished }
-    private let text: String
-    private let pasteboard: NSPasteboard
-    private let archive: () async throws -> Void
-    private let onClose: (Completion) -> Void
+    enum Action: Equatable { case copy, export, reset, finish, cancel }
+    private let onAction: (Action) -> Void
     private let status = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
     private var buttons: [NSButton] = []
-    private var operation: Task<Void, Never>?
+    private var working = false
 
-    init(text: String, pasteboard: NSPasteboard = .general,
-         archive: @escaping () async throws -> Void, onClose: @escaping (Completion) -> Void) {
-        self.text = text; self.pasteboard = pasteboard
-        self.archive = archive; self.onClose = onClose
+    init(onAction: @escaping (Action) -> Void) {
+        self.onAction = onAction
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 168),
                               styleMask: [.titled], backing: .buffered, defer: false)
         super.init(window: window)
@@ -45,86 +41,48 @@ final class FinishReviewSheet: NSWindowController {
         for view in [feedback, actions] {
             view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
-        copyAgain()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     @objc func copyAgain() {
-        guard operation == nil else { return }
-        pasteboard.clearContents()
-        if pasteboard.setString(text, forType: .string) {
-            showStatus("Review copied to clipboard.")
-        } else {
-            showStatus("Could not copy the review. Try Copy again or Export.", failed: true)
-        }
+        guard !working else { return }
+        onAction(.copy)
     }
 
     @objc private func exportMarkdown() {
-        guard operation == nil, let window else { return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "review.md"
-        panel.allowedContentTypes = [.plainText]
-        panel.canCreateDirectories = true
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.export(to: url)
-        }
+        guard !working else { return }
+        onAction(.export)
     }
-
-    func export(to url: URL) {
-        guard operation == nil else { return }
-        setWorking("Exporting review…")
-        operation = Task { [weak self, text] in
-            do {
-                try await Task.detached { try text.write(to: url, atomically: true, encoding: .utf8) }.value
-                self?.showStatus("Exported \(url.lastPathComponent).")
-            } catch {
-                self?.showStatus("Could not export: \(error.localizedDescription) Try Export again.", failed: true)
-            }
-            self?.setWorking(nil)
-        }
+    @objc func finish() {
+        guard !working else { return }
+        onAction(.finish)
     }
-
-    @objc func finish() { archiveAndDismiss(.finished) }
-    @objc func reset() { archiveAndDismiss(.reset) }
-
-    private func archiveAndDismiss(_ completion: Completion) {
-        guard operation == nil else { return }
-        setWorking("Archiving review…")
-        operation = Task { [weak self, archive] in
-            do {
-                try await archive()
-                self?.setWorking(nil)
-                self?.dismiss(completion)
-            } catch {
-                self?.showStatus("Could not archive: \(error.localizedDescription) Your active review is unchanged. Try again.", failed: true)
-                self?.setWorking(nil)
-            }
-        }
+    @objc func reset() {
+        guard !working else { return }
+        onAction(.reset)
     }
 
     @objc func cancel() {
-        guard operation == nil else { return }
-        dismiss(.cancelled)
+        guard !working else { return }
+        onAction(.cancel)
     }
 
-    private func dismiss(_ completion: Completion) {
+    func dismiss() {
         if let window {
             window.sheetParent?.endSheet(window)
             window.orderOut(nil)
         }
-        onClose(completion)
     }
-    private func setWorking(_ message: String?) {
-        for button in buttons { button.isEnabled = message == nil }
-        spinner.isHidden = message == nil
-        if let message {
+    func render(message: String, failed: Bool = false, working: Bool = false) {
+        self.working = working
+        for button in buttons { button.isEnabled = !working }
+        spinner.isHidden = !working
+        if working {
             spinner.startAnimation(nil)
-            showStatus(message)
         } else {
             spinner.stopAnimation(nil)
-            operation = nil
         }
+        showStatus(message, failed: failed)
     }
     private func showStatus(_ message: String, failed: Bool = false) {
         status.stringValue = message

@@ -2,7 +2,7 @@ import XCTest
 @testable import McDiffCore
 
 final class ReviewStoreTests: XCTestCase {
-    func testFinishPreservesExactSavedRoundAndComparisonThenReopensEmpty() throws {
+    func testFinishPreservesExactSavedRoundAndComparisonThenReopensWithMarksOnly() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mcdiff-finish-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try ReviewStore(directory: directory)
@@ -38,7 +38,7 @@ final class ReviewStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("preferences.json")), preferences)
         let reopened = try ReviewStore(directory: directory)
         XCTAssertTrue(try reopened.loadProgress(identity: snapshot.identity).comments.isEmpty)
-        XCTAssertTrue(try reopened.loadProgress(identity: snapshot.identity).reviewed.isEmpty)
+        XCTAssertEqual(try reopened.loadProgress(identity: snapshot.identity).reviewed, progress.reviewed)
         XCTAssertEqual(try reopened.loadProgress(identity: "other").reviewed, ["other.swift": "other"])
 
         let next = ReviewProgress(reviewed: ["file.swift": "current"])
@@ -50,7 +50,7 @@ final class ReviewStoreTests: XCTestCase {
                                                      from: Data(contentsOf: second.appendingPathComponent("progress.json")))
         XCTAssertEqual(secondProgress.reviewed, next.reviewed)
         XCTAssertTrue(secondProgress.comments.isEmpty)
-        XCTAssertTrue(try reopened.loadProgress(identity: snapshot.identity).reviewed.isEmpty)
+        XCTAssertEqual(try reopened.loadProgress(identity: snapshot.identity).reviewed, next.reviewed)
     }
 
     func testFinishNeverSavedWorkingTreeReviewArchivesEmptyRound() throws {
@@ -84,6 +84,7 @@ final class ReviewStoreTests: XCTestCase {
         let preferences = try Data(contentsOf: directory.appendingPathComponent("preferences.json"))
         try Data("blocking file".utf8).write(to: directory.appendingPathComponent("completed-reviews"))
         XCTAssertThrowsError(try store.finishReview(snapshot: snapshot))
+        XCTAssertThrowsError(try store.resetReview(snapshot: snapshot))
         XCTAssertEqual(try Data(contentsOf: active), original)
         XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed, ["file.swift": "current"])
         XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("preferences.json")), preferences)
@@ -102,21 +103,89 @@ final class ReviewStoreTests: XCTestCase {
         let original = try Data(contentsOf: active)
         let archives = directory.appendingPathComponent("completed-reviews")
         try FileManager.default.createDirectory(at: archives, withIntermediateDirectories: false)
-        // Metadata can be prepared inside the writable archive parent, but the active
-        // file cannot be removed from its read-only parent by the final rename.
+        // The historical round can be written inside the writable archive parent,
+        // but active progress cannot be atomically replaced in its read-only parent.
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
-        XCTAssertThrowsError(try store.finishReview(snapshot: snapshot)) { error in
-            XCTAssertEqual((error as NSError).domain, NSPOSIXErrorDomain)
-        }
+        XCTAssertThrowsError(try store.finishReview(snapshot: snapshot))
+        XCTAssertThrowsError(try store.resetReview(snapshot: snapshot))
         XCTAssertEqual(try Data(contentsOf: active), original)
         XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed, ["file.swift": "current"])
         let prepared = try FileManager.default.contentsOfDirectory(at: archives, includingPropertiesForKeys: nil)
-        XCTAssertEqual(prepared.count, 1)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(prepared.first).appendingPathComponent("metadata.json").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(prepared.first).appendingPathComponent("progress.json").path))
+        XCTAssertEqual(prepared.count, 2)
+        for archive in prepared {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: archive.appendingPathComponent("metadata.json").path))
+            XCTAssertEqual(try Data(contentsOf: archive.appendingPathComponent("progress.json")), original)
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let completed = try store.finishReview(snapshot: snapshot)
         XCTAssertEqual(try Data(contentsOf: completed.appendingPathComponent("progress.json")), original)
+    }
+
+    func testTenRoundsAcrossRelaunchesKeepOnlyMatchingManualMarksAndArchiveComments() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mcdiff-rounds-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        _ = try ProcessRunner.run("git", ["init", "-b", "main"], directory: directory.path)
+        _ = try ProcessRunner.run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "--allow-empty", "-m", "Initial"], directory: directory.path)
+        for path in ["unchanged.swift", "changed.swift", "unchecked.swift"] {
+            try Data("let value = 1\n".utf8).write(to: directory.appendingPathComponent(path))
+        }
+        let request = ComparisonRequest(repository: directory.path, base: "main")
+        let storage = directory.appendingPathComponent(".git/reviews")
+        var store = try ReviewStore(directory: storage)
+        let initial = try GitRepository(path: directory.path).load(request)
+        var expectedMarks = Dictionary(uniqueKeysWithValues: initial.files
+            .filter { $0.path != "unchecked.swift" }.map { ($0.path, $0.fingerprint) })
+        try store.saveProgress(.init(reviewed: expectedMarks), identity: initial.identity)
+
+        for round in 1...10 {
+            if round == 5 {
+                try Data("let value = 2\n".utf8).write(to: directory.appendingPathComponent("changed.swift"))
+            }
+            let snapshot = try GitRepository(path: directory.path).load(request)
+            XCTAssertEqual(snapshot.identity, initial.identity)
+            var progress = try store.loadProgress(identity: snapshot.identity)
+            if round == 8 {
+                progress.reviewed.removeValue(forKey: "unchanged.swift")
+                expectedMarks.removeValue(forKey: "unchanged.swift")
+            }
+            let changed = try XCTUnwrap(snapshot.files.first { $0.path == "changed.swift" })
+            XCTAssertEqual(progress.reviewed[changed.path] == changed.fingerprint, round < 5)
+            let comment = ReviewComment(path: changed.path, side: .new, startLine: 1, endLine: 1,
+                                        text: "Round \(round)", fingerprint: changed.fingerprint)
+            progress.comments = [comment]
+            try store.saveProgress(progress, identity: snapshot.identity)
+            let archive = try store.finishReview(snapshot: snapshot)
+            let archived = try JSONDecoder().decode(ReviewProgress.self,
+                from: Data(contentsOf: archive.appendingPathComponent("progress.json")))
+            XCTAssertEqual(archived.comments, [comment])
+            XCTAssertEqual(archived.reviewed, expectedMarks)
+            store = try ReviewStore(directory: storage)
+            let reopened = try store.loadProgress(identity: snapshot.identity)
+            XCTAssertTrue(reopened.comments.isEmpty)
+            XCTAssertEqual(reopened.reviewed, expectedMarks)
+            XCTAssertNil(reopened.reviewed["unchecked.swift"])
+        }
+    }
+
+    func testResetArchivesThenClearsMarksAndCommentsAcrossRelaunch() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mcdiff-reset-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ReviewStore(directory: directory)
+        let snapshot = completedSnapshot()
+        let progress = ReviewProgress(reviewed: ["file.swift": "current"], comments: [
+            .init(path: "file.swift", side: .new, startLine: 1, endLine: 1, text: "Feedback", fingerprint: "current")
+        ])
+        try store.saveProgress(progress, identity: snapshot.identity)
+        let archive = try store.resetReview(snapshot: snapshot)
+        let archived = try JSONDecoder().decode(ReviewProgress.self,
+            from: Data(contentsOf: archive.appendingPathComponent("progress.json")))
+        XCTAssertEqual(archived.reviewed, progress.reviewed)
+        XCTAssertEqual(archived.comments, progress.comments)
+        let reopened = try ReviewStore(directory: directory).loadProgress(identity: snapshot.identity)
+        XCTAssertTrue(reopened.reviewed.isEmpty)
+        XCTAssertTrue(reopened.comments.isEmpty)
     }
 
     func testFinishRejectsCorruptActiveDataWithoutDiscardingIt() throws {

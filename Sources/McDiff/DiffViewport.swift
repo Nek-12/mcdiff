@@ -63,7 +63,11 @@ struct LineSelection {
 
 final class HighlightBox: NSObject {
     let value: HighlightedFile
-    init(_ value: HighlightedFile) { self.value = value }
+    let context: [DiffLine]
+    init(_ value: HighlightedFile, context: [DiffLine]) {
+        self.value = value
+        self.context = context
+    }
 }
 
 final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
@@ -72,7 +76,9 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     let pinnedHeader = PinnedFileHeader()
     let contexts = ContextSections()
     private var horizontalMetrics: [String: FileHorizontalMetrics] = [:]
-    var files: [FileDiff] = []
+    var files: [FileDiff] = [] {
+        didSet { selection = nil; textSelection = nil }
+    }
     var presentations: [String: [PresentedRow]] = [:]
     var markdownContent: [String: MarkdownFileContent] = [:] {
         didSet {
@@ -95,6 +101,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         if renderedMarkdownPaths.contains(path) { renderedMarkdownPaths.remove(path) }
         else { renderedMarkdownPaths.insert(path) }
         if selection?.file == index { selection = nil }
+        if textSelection?.file == index { textSelection = nil }
         markdownTask?.cancel(); markdownTask = nil
         visibleMarkdown.removeAll()
         replaceFileRows(at: index)
@@ -123,13 +130,32 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
     private func replaceRows(in range: Range<Int>, with replacement: [CanvasRow], preserving anchor: Int,
                              newAnchor: Int? = nil, continueNavigation: Bool = false) {
-        if !continueNavigation { stopNavigation() }
-        Style.animateStateChange(scroll.contentView)
+        if !continueNavigation {
+            stopNavigation()
+            Style.animateStateChange(scroll.contentView)
+        }
         preservingScrollAnchor(row: anchor, newRow: newAnchor) {
             // Preserve measured geometry outside the changed section; it defines
             // the clicked header's position while replacement heights are prepared.
             if rowHeights.count == rows.count {
                 var heights = replacement.map(\.height)
+                // Reuse unchanged prefix/suffix measurements within the file too.
+                // Resetting wrapped rows before an inserted section can briefly
+                // move its control above y=0 and clamp away the scroll anchor.
+                var prefix = 0
+                while prefix < min(range.count, replacement.count),
+                      rows[range.lowerBound + prefix].sameLocation(as: replacement[prefix]),
+                      rows[range.lowerBound + prefix].height == replacement[prefix].height {
+                    heights[prefix] = rowHeights[range.lowerBound + prefix]
+                    prefix += 1
+                }
+                var suffix = 0
+                while suffix < min(range.count, replacement.count) - prefix,
+                      rows[range.upperBound - suffix - 1].sameLocation(as: replacement[replacement.count - suffix - 1]),
+                      rows[range.upperBound - suffix - 1].height == replacement[replacement.count - suffix - 1].height {
+                    heights[replacement.count - suffix - 1] = rowHeights[range.upperBound - suffix - 1]
+                    suffix += 1
+                }
                 if let newAnchor, heights.indices.contains(newAnchor - range.lowerBound),
                    replacement[newAnchor - range.lowerBound].sameLocation(as: rows[anchor]) {
                     heights[newAnchor - range.lowerBound] = rowHeights[anchor]
@@ -150,6 +176,12 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var filters = ReviewFilters()
     var isReviewed: (FileDiff) -> Bool = { _ in false }
     var onReviewToggle: ((FileDiff, Bool) -> Void)?
+    var onFinishReview: (() -> Void)?
+    var finishReviewEnabled = false {
+        didSet {
+            if finishReviewEnabled != oldValue { redraw() }
+        }
+    }
     private var comments: [String: [DiffSide: [ReviewComment]]] = [:]
     private var numberWidths: [CGFloat] = []
 
@@ -167,6 +199,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var onFocus: ((Int) -> Void)?
     var onComment: ((LineSelection) -> Void)?
     var selection: LineSelection?
+    private(set) var textSelection: SourceTextSelection?
     var focusedFile = 0
     private var rowHeights: [CGFloat] = []
     private var layoutTask: Task<Void, Never>?
@@ -236,7 +269,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var onHighlightError: ((Error) -> Void)?
     private var observers: [NSObjectProtocol] = []
     private var navigationAnimation: FileNavigationAnimation?
-    private var paddingHeight: CGFloat = 1
+    private var paddingHeight: CGFloat = ReviewFooterView.minimumHeight
     private let markdownLayouts = NSCache<NSString, MarkdownPairLayout>()
     private let markdownRenderer = MarkdownLayoutService()
     private var visibleMarkdown: [NSString: MarkdownPairLayout] = [:]
@@ -298,7 +331,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         scroll.frame = bounds
         table.setFrameSize(NSSize(width: scroll.contentSize.width, height: table.frame.height))
         table.tableColumns.first?.width = scroll.contentSize.width
-        let padding = max(1, scroll.contentSize.height - 38)
+        let padding = max(ReviewFooterView.minimumHeight, scroll.contentSize.height - 38)
         if padding != paddingHeight {
             paddingHeight = padding
             if !rows.isEmpty { updateRowHeights(IndexSet(integer: rows.count - 1)) }
@@ -341,7 +374,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         markdownTask?.cancel(); markdownTask = nil
         markdownLayouts.removeAllObjects(); markdownHeights.removeAll()
         visibleMarkdown.removeAll()
-        selection = nil; expandedImports.removeAll()
+        selection = nil; textSelection = nil; expandedImports.removeAll()
         horizontalMetrics.removeAll()
         rebuild()
         search(query: searchQuery)
@@ -365,10 +398,12 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let files = files, presentations = presentations, markdown = markdownContent, layout = diffLayout
         let sourcePaths = Set(files.filter { !rendersMarkdown($0) }.map(\.path))
         let context = contexts.expandedPairs
+        let ignoringWhitespace = filters.whitespaceAndImports
         searchTask = Task { [weak self, searchEngine] in
             do {
                 let results = try await searchEngine.search(query: query, files: files, presentations: presentations,
-                                                            markdown: markdown, sourcePaths: sourcePaths, layout: layout, context: context)
+                                                            markdown: markdown, sourcePaths: sourcePaths, layout: layout, context: context,
+                                                            ignoringWhitespace: ignoringWhitespace)
                 var index = 0
                 if let preferredMatch { index = try await searchEngine.index(of: preferredMatch, in: results) ?? 0 }
                 let first = try await searchEngine.resolve(results, at: index)
@@ -601,8 +636,6 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
     private func updateContextLayout(file: Int, anchor: Int? = nil, visibleSource: Bool = false) {
         let path = files[file].path
-        highlightTask?.cancel(); highlightTask = nil
-        highlights.removeAllObjects(); failedHighlights.removeAll()
         let originalMaximum = (presentations[path] ?? []).reduce(1) { maximum, row in
             switch row {
             case .code(let pair): return max(maximum, pair.old?.oldNumber ?? 0, pair.new?.newNumber ?? 0)
@@ -633,7 +666,9 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
     private func sourceRows(_ pairs: [DiffPair], file: Int) -> [CanvasRow] {
-        DiffPresentation.sourceRows(pairs, layout: diffLayout).map {
+        let displayed = filters.whitespaceAndImports
+            ? DiffPresentation.ignoringWhitespace(in: pairs, file: files[file]) : pairs
+        return DiffPresentation.sourceRows(displayed, layout: diffLayout).map {
             CanvasRow(file: file, content: .code($0.pair), sourceSide: $0.side)
         }
     }
@@ -684,6 +719,14 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if case .padding = rows[row].content {
+            let id = NSUserInterfaceItemIdentifier("review-footer")
+            let footer = tableView.makeView(withIdentifier: id, owner: nil) as? ReviewFooterView ?? ReviewFooterView()
+            footer.identifier = id
+            footer.onFinishReview = { [weak self] in self?.onFinishReview?() }
+            footer.update(remainingFiles: files.filter { !isReviewed($0) }.count, finishEnabled: finishReviewEnabled)
+            return footer
+        }
         let id = NSUserInterfaceItemIdentifier("diff-row")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? DiffCell ?? DiffCell()
         cell.identifier = id
@@ -707,6 +750,8 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
     private func highlightKey(_ file: FileDiff, page: Int) -> NSString { "\(file.fingerprint):\(Style.dark):\(page)" as NSString }
     func redraw() {
+        let footer = rows.isEmpty ? nil : table.view(atColumn: 0, row: rows.count - 1, makeIfNecessary: false) as? ReviewFooterView
+        footer?.update(remainingFiles: files.filter { !isReviewed($0) }.count, finishEnabled: finishReviewEnabled)
         table.enumerateAvailableRowViews { row, _ in
             row.needsDisplay = true
             row.subviews.forEach {
@@ -835,13 +880,20 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let range = table.rows(in: scroll.documentVisibleRect)
         guard range.location != NSNotFound, range.length > 0 else { return }
         let visible = rows[range.location..<min(rows.count, range.location + range.length)]
+        var seenPages: [Int: Set<Int>] = [:]
         let pages = visible.flatMap { row -> [(Int, Int)] in
             guard case .code(let pair) = row.content else { return [] }
-            return [pair.old?.oldNumber, pair.new?.newNumber].compactMap { $0 }.map { (row.file, max(0, $0 - 1) / SyntaxService.pageSize) }
+            return [pair.old?.oldNumber, pair.new?.newNumber].compactMap { number in
+                guard let number else { return nil }
+                let page = max(0, number - 1) / SyntaxService.pageSize
+                guard seenPages[row.file, default: []].insert(page).inserted else { return nil }
+                return (row.file, page)
+            }
         }
         guard let (index, page) = pages.first(where: { index, page in
             let key = highlightKey(files[index], page: page)
-            return highlights.object(forKey: key) == nil && !failedHighlights.contains(key as String)
+            return !failedHighlights.contains(key as String) &&
+                highlights.object(forKey: key)?.context != contextPageLines(file: index, page: page)
         }) else { return }
         let file = files[index], key = highlightKey(file, page: page), dark = Style.dark
         let context = contextPageLines(file: index, page: page)
@@ -849,8 +901,12 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             do {
                 let value = try await syntax.highlight(file: file, dark: dark, page: page, context: context)
                 guard !Task.isCancelled, let self else { return }
-                self.highlights.setObject(HighlightBox(value), forKey: key, cost: value.cost)
-                self.redraw()
+                // Context may change while highlighting. Keep the previous colors
+                // until a result for the displayed source is ready.
+                if self.contextPageLines(file: index, page: page) == context {
+                    self.highlights.setObject(HighlightBox(value, context: context), forKey: key, cost: value.cost)
+                    self.redraw()
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -900,6 +956,99 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
         return rows[row].sourceSide ?? .new
     }
+    func numberSide(row: Int, point: NSPoint) -> DiffSide? {
+        guard rows.indices.contains(row), case .code = rows[row].content else { return nil }
+        let file = rows[row].file, gutter = sourceGutter(file: file)
+        let side = sourceSide(row: row, x: point.x)
+        let localX = point.x - (diffLayout == .split && side == .new ? table.bounds.width / 2 : 0)
+        for candidate in diffLayout == .unified ? [DiffSide.old, .new] : [side] {
+            let leading = gutter.columnOffset(candidate)
+            if localX >= leading && localX <= leading + gutter.numberWidth,
+               rows[row].line(on: candidate) != nil { return candidate }
+        }
+        return nil
+    }
+
+    enum PointerSelection {
+        case lines(LineSelection)
+        case text(SourceTextSelection)
+    }
+
+    func beginPointerSelection(row: Int, point: NSPoint, shift: Bool) -> PointerSelection? {
+        guard rows.indices.contains(row), case .code = rows[row].content else { return nil }
+        let item = rows[row]
+        let side = sourceSide(row: row, x: point.x)
+        let localX = point.x - (diffLayout == .split && side == .new ? table.bounds.width / 2 : 0)
+        if let line = item.line(on: side),
+           let number = side == .old ? line.oldNumber : line.newNumber,
+           let marker = commentMarkerRect(file: item.file, side: side),
+           localX >= marker.minX && localX <= marker.maxX,
+           commentRange(files[item.file].path, side, number) != nil {
+            click(row: row, point: point, shift: false)
+            commitSelection()
+            return nil
+        }
+        if numberSide(row: row, point: point) != nil {
+            click(row: row, point: point, shift: shift)
+            return selection.map(PointerSelection.lines)
+        }
+        guard hitsCode(row: row, point: point),
+              let position = textPosition(row: row, point: point, side: side) else {
+            selection = nil; textSelection = nil; redraw()
+            return nil
+        }
+        let anchor = shift && textSelection?.file == item.file && textSelection?.side == side
+            ? textSelection!.anchor : position
+        let value = SourceTextSelection(file: item.file, side: side, anchor: anchor, head: position)
+        textSelection = value; selection = nil
+        focusedFile = item.file; onFocus?(item.file)
+        redraw()
+        return .text(value)
+    }
+
+    func updatePointerSelection(row: Int, point: NSPoint, anchor: PointerSelection) {
+        switch anchor {
+        case .lines(let value): drag(row: row, point: point, anchor: value)
+        case .text(let value):
+            guard rows.indices.contains(row), rows[row].file == value.file,
+                  let position = textPosition(row: row, point: point, side: value.side) else { return }
+            textSelection = SourceTextSelection(file: value.file, side: value.side, anchor: value.anchor, head: position)
+            redraw()
+        }
+    }
+
+    func endPointerSelection(_ anchor: PointerSelection) {
+        if case .lines = anchor { commitSelection() }
+    }
+
+    private func textPosition(row: Int, point: NSPoint, side: DiffSide) -> SourceTextPosition? {
+        guard let line = rows[row].line(on: side),
+              let number = side == .old ? line.oldNumber : line.newNumber else { return nil }
+        let file = rows[row].file
+        let rich = richText(file: files[file], side: side, line: number) ??
+            NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    "), attributes: [.font: Style.codeFont])
+        let fragments = textFragments(rich, file: file, side: side)
+        guard !fragments.isEmpty else { return SourceTextPosition(line: number, offset: 0) }
+        let index = max(0, min(fragments.count - 1, Int((point.y - table.rect(ofRow: row).minY) / Style.rowHeight)))
+        let fragment = fragments[index]
+        let ct = CTTypesetterCreateLine(CTTypesetterCreateWithAttributedString(rich),
+                                       CFRange(location: fragment.location, length: fragment.length))
+        let origin: CGFloat = diffLayout == .split && side == .new ? table.bounds.width / 2 : 0
+        let x = point.x - origin - sourceTextInset(file: file) + horizontalOffset(file: file, side: side)
+        let hit: CFIndex
+        if x <= 0 { hit = fragment.location }
+        else if x >= CTLineGetTypographicBounds(ct, nil, nil, nil) { hit = NSMaxRange(fragment) }
+        else { hit = CTLineGetStringIndexForPosition(ct, CGPoint(x: x, y: 0)) }
+        let offset = hit == kCFNotFound ? NSMaxRange(fragment) : max(fragment.location, min(NSMaxRange(fragment), hit))
+        return SourceTextPosition(line: number, offset: SourceTextOffsets.sourceOffset(offset, in: line.text))
+    }
+
+    func toggleFocusedReviewed() {
+        guard files.indices.contains(focusedFile) else { return }
+        let file = files[focusedFile]
+        guard filters.skipReason(for: file) == nil else { return }
+        onReviewToggle?(file, !isReviewed(file))
+    }
     func click(row: Int, point: NSPoint, shift: Bool) {
         guard rows.indices.contains(row) else { return }
         stopNavigation()
@@ -927,8 +1076,9 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
             }
             contexts.toggle(file: file, section: section)
         case .code(let pair):
-            let side = sourceSide(row: row, x: point.x)
+            let side = numberSide(row: row, point: point) ?? sourceSide(row: row, x: point.x)
             guard let number = side == .old ? pair.old?.oldNumber : pair.new?.newNumber else { return }
+            textSelection = nil
             if shift, let selection, selection.file == item.file, selection.side == side {
                 self.selection = LineSelection(file: item.file, side: side, start: min(selection.start, number), end: max(selection.start, number))
             } else {
@@ -997,6 +1147,7 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
                 if case .file = row.content { widths[row.file] = FileHorizontalMetrics() }
                 if case .code = row.content {
                     for (side, line) in [(DiffSide.old, row.line(on: .old)), (.new, row.line(on: .new))] {
+                        if let displayed = row.sourceSide, displayed != side { continue }
                         guard let line else { continue }
                         autoreleasepool {
                             let text = NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    "), attributes: [.font: font])
@@ -1067,24 +1218,37 @@ final class DiffViewport: NSView, NSTableViewDataSource, NSTableViewDelegate {
         NSPasteboard.general.setString(text, forType: .string)
     }
     func selectedSourceText() -> String? {
-        guard let selection, files.indices.contains(selection.file) else { return nil }
-        let file = files[selection.file]
+        let fileIndex = textSelection?.file ?? selection?.file
+        let side = textSelection?.side ?? selection?.side
+        guard let fileIndex, let side, files.indices.contains(fileIndex) else { return nil }
+        let file = files[fileIndex]
         let context = (contexts.expandedPairs[file.path] ?? [:]).values.flatMap { pairs in
-            pairs.compactMap { selection.side == .old ? $0.old : $0.new }
+            pairs.compactMap { side == .old ? $0.old : $0.new }
         }
         let presented = (presentations[file.path] ?? []).flatMap { row -> [DiffLine] in
             switch row {
-            case .code(let pair): return (selection.side == .old ? pair.old : pair.new).map { [$0] } ?? []
-            case .imports(let pairs): return pairs.compactMap { selection.side == .old ? $0.old : $0.new }
+            case .code(let pair): return (side == .old ? pair.old : pair.new).map { [$0] } ?? []
+            case .imports(let pairs): return pairs.compactMap { side == .old ? $0.old : $0.new }
             default: return []
             }
         }
         let lines = (presented + context).filter {
-            let n = selection.side == .old ? $0.oldNumber : $0.newNumber
+            let n = side == .old ? $0.oldNumber : $0.newNumber
+            if let textSelection {
+                return n.map { (textSelection.start.line...textSelection.end.line).contains($0) } ?? false
+            }
+            guard let selection else { return false }
             return n.map { $0 >= selection.start && $0 <= selection.end } ?? false
         }.sorted {
-            (selection.side == .old ? $0.oldNumber! : $0.newNumber!) <
-                (selection.side == .old ? $1.oldNumber! : $1.newNumber!)
+            (side == .old ? $0.oldNumber! : $0.newNumber!) <
+                (side == .old ? $1.oldNumber! : $1.newNumber!)
+        }
+        if let textSelection {
+            guard textSelection.start != textSelection.end else { return nil }
+            return lines.compactMap { line in
+                let number = side == .old ? line.oldNumber! : line.newNumber!
+                return textSelection.range(line: number, text: line.text).map { (line.text as NSString).substring(with: $0) }
+            }.joined(separator: "\n")
         }
         return lines.map(\.text).joined(separator: "\n")
     }
@@ -1153,21 +1317,24 @@ final class DiffTable: NSTableView {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         let index = row(at: point)
-        let isCode: Bool
         if let owner, owner.rows.indices.contains(index), case .code = owner.rows[index].content {
-            guard owner.hitsCode(row: index, point: point) else { return }
-            isCode = true
-        } else { isCode = false }
-        owner?.click(row: index, point: point, shift: event.modifierFlags.contains(.shift))
-        guard isCode else { return }
-        guard let anchor = owner?.selection else { return }
-        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            if next.type == .leftMouseUp { break }
-            let point = convert(next.locationInWindow, from: nil)
-            autoscroll(with: next)
-            owner?.drag(row: row(at: point), point: point, anchor: anchor)
+            guard let anchor = owner.beginPointerSelection(row: index, point: point, shift: event.modifierFlags.contains(.shift)) else { return }
+            while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                let point = convert(next.locationInWindow, from: nil)
+                if next.type == .leftMouseDragged { autoscroll(with: next) }
+                owner.updatePointerSelection(row: row(at: point), point: point, anchor: anchor)
+                if next.type == .leftMouseUp { break }
+            }
+            owner.endPointerSelection(anchor)
+        } else {
+            owner?.click(row: index, point: point, shift: event.modifierFlags.contains(.shift))
         }
-        owner?.commitSelection()
+    }
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers.isEmpty, [" ", "\r", "\u{3}"].contains(event.charactersIgnoringModifiers ?? "") {
+            owner?.toggleFocusedReviewed()
+        } else { super.keyDown(with: event) }
     }
     override func scrollWheel(with event: NSEvent) {
         owner?.stopNavigation()
@@ -1191,11 +1358,13 @@ final class DiffTable: NSTableView {
         let point = convert(event.locationInWindow, from: nil)
         let index = row(at: point)
         if let owner, owner.rows.indices.contains(index), case .code = owner.rows[index].content {
-            guard owner.hitsCode(row: index, point: point) else { return nil }
-            if owner.selection == nil { owner.click(row: index, point: point, shift: false) }
+            guard owner.hitsCode(row: index, point: point) || owner.numberSide(row: index, point: point) != nil else { return nil }
             let menu = NSMenu()
-            let add = menu.addItem(withTitle: "Comment on selected lines", action: #selector(comment(_:)), keyEquivalent: "")
-            add.target = self
+            if owner.numberSide(row: index, point: point) != nil {
+                if owner.selection == nil { owner.click(row: index, point: point, shift: false) }
+                let add = menu.addItem(withTitle: "Comment on selected lines", action: #selector(comment(_:)), keyEquivalent: "")
+                add.target = self
+            }
             let copy = menu.addItem(withTitle: "Copy selected code", action: #selector(copy(_:)), keyEquivalent: "")
             copy.target = self
             return menu
@@ -1508,6 +1677,19 @@ final class DiffCell: NSView {
                     let left = CTLineGetOffsetForStringIndex(ct, range.location, nil)
                     let right = CTLineGetOffsetForStringIndex(ct, NSMaxRange(range), nil)
                     NSRect(x: x + min(left, right), y: y + 2, width: max(2, abs(right - left)), height: Style.rowHeight - 4).fill()
+                }
+            }
+            if let selection = owner.textSelection, selection.file == fileIndex,
+               selection.side == side,
+               let sourceRange = selection.range(line: number, text: line.text) {
+                let start = SourceTextOffsets.displayOffset(sourceRange.location, in: line.text)
+                let end = SourceTextOffsets.displayOffset(NSMaxRange(sourceRange), in: line.text)
+                let range = NSIntersectionRange(NSRange(location: start, length: end - start), fragment)
+                if range.length > 0 {
+                    let left = CTLineGetOffsetForStringIndex(ct, range.location, nil)
+                    let right = CTLineGetOffsetForStringIndex(ct, NSMaxRange(range), nil)
+                    NSColor.selectedTextBackgroundColor.setFill()
+                    NSRect(x: x + min(left, right), y: y + 1, width: abs(right - left), height: Style.rowHeight - 2).fill()
                 }
             }
             if let context = NSGraphicsContext.current?.cgContext {
