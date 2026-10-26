@@ -33,7 +33,6 @@ final class ComparisonSheet: NSWindowController {
         tabs.segmentStyle = .automatic
         tabs.setToolTip("Open a GitHub pull request using an existing checkout", forSegment: 0)
         tabs.setToolTip("Compare local branches, revisions, or working changes", forSegment: 1)
-        if #available(macOS 27, *) { tabs.role = .tabs }
         let title = Style.label("Open review", size: 17, weight: .semibold)
         let close = Style.button("", icon: .close, target: self, action: #selector(cancel))
         close.keyEquivalent = "\u{1b}"; close.toolTip = "Close"
