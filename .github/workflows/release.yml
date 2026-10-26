@@ -41,7 +41,8 @@ jobs:
         run: |
           test -n "$BREW_TAP_TOKEN" || { echo "Configure BREW_TAP_TOKEN with Contents read/write on Nek-12/homebrew-tap." >&2; exit 1; }
           # API/auth failures must not be mistaken for a free release number.
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" --jq 'add' > "$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > "$RUNNER_TEMP/release-pages.json"
+          jq 'add' "$RUNNER_TEMP/release-pages.json" > "$RUNNER_TEMP/releases.json"
           bash scripts/next-version.sh "$RUNNER_TEMP/releases.json" >> "$GITHUB_OUTPUT"
       - name: Test
         run: swift test
