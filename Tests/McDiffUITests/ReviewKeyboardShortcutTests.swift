@@ -17,7 +17,17 @@ final class ReviewKeyboardShortcutTests: XCTestCase {
     }
 
     @MainActor
-    func testSidebarKeysToggleSelectedFilePersistAndLeaveAutomaticReviewUntouched() async throws {
+    func testSidebarReviewKeysAdvanceWithoutUnreviewingAndPreserveEditorsAndFailedSaves() async throws {
+        try await exerciseReviewKeys(inDiff: false)
+    }
+
+    @MainActor
+    func testDiffReviewKeysAdvanceWithoutUnreviewingAndPreserveEditorsAndFailedSaves() async throws {
+        try await exerciseReviewKeys(inDiff: true)
+    }
+
+    @MainActor
+    private func exerciseReviewKeys(inDiff: Bool) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -26,7 +36,7 @@ final class ReviewKeyboardShortcutTests: XCTestCase {
             _ = try ProcessRunner.run("/usr/bin/git", ["init", "-b", "main"], directory: directory.path)
             _ = try ProcessRunner.run("/usr/bin/git", ["-c", "user.name=Test", "-c", "user.email=test@example.com",
                                                      "commit", "--allow-empty", "-m", "Initial"], directory: directory.path)
-            for name in ["a.swift", "b.swift", "README.md"] {
+            for name in ["a.swift", "b.swift", "c.swift", "README.md"] {
                 try "let value = 1\n".write(to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8)
             }
         }.value
@@ -56,47 +66,58 @@ final class ReviewKeyboardShortcutTests: XCTestCase {
         let viewport = try XCTUnwrap(views.compactMap { $0 as? DiffViewport }.first)
         let sidebar = try XCTUnwrap(views.compactMap { $0 as? NSTableView }
             .first { $0.tableColumns.first?.identifier.rawValue == "path" })
+        let keyboardTarget = inDiff ? viewport.table : sidebar
         let file = try XCTUnwrap(viewport.files.first { $0.path == "b.swift" })
         let first = try XCTUnwrap(viewport.files.first { $0.path == "a.swift" })
+        let third = try XCTUnwrap(viewport.files.first { $0.path == "c.swift" })
+        viewport.onReviewToggle?(third, true)
         let snapshot = try await Task.detached {
             try GitRepository(path: directory.path).load(ComparisonRequest(repository: directory.path, base: "main"))
         }.value
 
-        // Programmatic selection deliberately leaves the viewport on another file.
-        sidebar.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
-        sidebar.keyDown(with: try key(" "))
+        // Sidebar selection deliberately leaves the viewport on another file.
+        if inDiff { viewport.navigate(to: 1) }
+        else { sidebar.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
+        keyboardTarget.keyDown(with: try key(" "))
         XCTAssertTrue(viewport.isReviewed(file))
         XCTAssertFalse(viewport.isReviewed(first))
         XCTAssertFalse(viewport.expanded.contains(file.path))
         XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed[file.path], file.fingerprint)
-
-        sidebar.keyDown(with: try key("\r"))
-        XCTAssertFalse(viewport.isReviewed(file))
-        XCTAssertTrue(viewport.expanded.contains(file.path))
-        XCTAssertNil(try store.loadProgress(identity: snapshot.identity).reviewed[file.path])
-        sidebar.keyDown(with: try key("\u{3}"))
-        XCTAssertTrue(viewport.isReviewed(file))
+        XCTAssertEqual(sidebar.selectedRow, 0, "Advance must skip manually and automatically reviewed files and wrap")
 
         // A rejected save must not change either the mark or the expansion.
         let savedProgress = try store.loadProgress(identity: snapshot.identity)
+        let expansionBeforeFailure = viewport.expanded
         try FileManager.default.removeItem(at: storage)
         try Data("not a directory".utf8).write(to: storage)
         controller.window = nil
-        sidebar.keyDown(with: try key(" "))
+        keyboardTarget.keyDown(with: try key(" "))
         controller.window = window
         XCTAssertTrue(viewport.isReviewed(file))
-        XCTAssertFalse(viewport.expanded.contains(file.path))
+        XCTAssertFalse(viewport.isReviewed(first))
+        XCTAssertEqual(viewport.expanded, expansionBeforeFailure)
+        XCTAssertEqual(sidebar.selectedRow, 0)
+        // Already-reviewed files advance even when storage is unavailable: there is nothing to save.
+        if inDiff { viewport.navigate(to: 1) }
+        else { sidebar.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
+        controller.window = nil
+        keyboardTarget.keyDown(with: try key("\u{3}"))
+        controller.window = window
+        XCTAssertEqual(sidebar.selectedRow, 0)
+        XCTAssertTrue(viewport.isReviewed(file))
+        XCTAssertFalse(viewport.isReviewed(first))
         try FileManager.default.removeItem(at: storage)
         try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
         try store.saveProgress(savedProgress, identity: snapshot.identity)
 
         let documentation = try XCTUnwrap(viewport.files.first { $0.path == "README.md" })
-        sidebar.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        if inDiff { viewport.navigate(to: 3) }
+        else { sidebar.selectRowIndexes(IndexSet(integer: 3), byExtendingSelection: false) }
         XCTAssertTrue(viewport.isReviewed(documentation))
-        let expansion = viewport.expanded
-        sidebar.keyDown(with: try key("\r"))
+        keyboardTarget.keyDown(with: try key("\r"))
         XCTAssertTrue(viewport.isReviewed(documentation))
-        XCTAssertEqual(viewport.expanded, expansion)
+        XCTAssertNil(try store.loadProgress(identity: snapshot.identity).reviewed[documentation.path])
+        XCTAssertEqual(sidebar.selectedRow, 0, "An automatically reviewed current file must still advance")
 
         let search = try XCTUnwrap(window.toolbar?.items.compactMap { $0 as? NSSearchToolbarItem }
             .first { $0.itemIdentifier.rawValue == "search" }?.searchField)
@@ -134,6 +155,24 @@ final class ReviewKeyboardShortcutTests: XCTestCase {
         XCTAssertTrue(controller.validateMenuItem(finishMenuItem))
         finishMenu.update()
         XCTAssertTrue(finishMenuItem.isEnabled)
+
+        // The diff uses the same action; repeated presses at the end never unreview or open Finish.
+        viewport.table.keyDown(with: try key(" "))
+        XCTAssertTrue(viewport.isReviewed(first))
+        XCTAssertEqual(sidebar.selectedRow, 0)
+        let completed = try store.loadProgress(identity: snapshot.identity)
+        for characters in [" ", "\r", "\u{3}"] {
+            sidebar.keyDown(with: try key(characters))
+            viewport.table.keyDown(with: try key(characters))
+            XCTAssertTrue(viewport.files.allSatisfy(viewport.isReviewed))
+            XCTAssertEqual(sidebar.selectedRow, 0)
+            XCTAssertNil(window.attachedSheet)
+        }
+        XCTAssertEqual(try store.loadProgress(identity: snapshot.identity).reviewed, completed.reviewed)
+        viewport.onReviewToggle?(first, false)
+        XCTAssertFalse(viewport.isReviewed(first), "Explicit checkboxes must still support unreviewing")
+        XCTAssertTrue(viewport.expanded.contains(first.path))
+        XCTAssertNil(try store.loadProgress(identity: snapshot.identity).reviewed[first.path])
         XCTAssertFalse(window.isVisible, "Keyboard tests must keep the window offscreen")
     }
 

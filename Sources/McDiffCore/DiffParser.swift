@@ -16,6 +16,7 @@ public enum DiffParser {
         var lines = patch.components(separatedBy: "\n")
         if lines.last == "" { lines.removeLast() }
         var files: [FileDiff] = []
+        var modes: [(old: String?, new: String?)] = []
         var i = 0
         func fail(_ detail: String) -> DiffParseError { .malformed(line: i + 1, detail: detail) }
         while i < lines.count {
@@ -24,6 +25,7 @@ public enum DiffParser {
             let paths = try headerPaths(String(lines[i].dropFirst(11)), line: i + 1)
             var oldPath = paths.0, path = paths.1, status = "M"
             var binary = false, metadataChanged = false, gitlink = false, hunks: [DiffHunk] = []
+            var oldMode: String?, newMode: String?
             i += 1
             while i < lines.count && !lines[i].hasPrefix("diff --git ") {
                 let line = lines[i]
@@ -86,9 +88,11 @@ public enum DiffParser {
                     status = line.hasPrefix("rename") ? "R" : "C"; metadataChanged = true
                 } else if line.hasPrefix("new file mode ") {
                     status = "A"; metadataChanged = true
+                    newMode = line.split(separator: " ").last.map(String.init)
                     gitlink = gitlink || line.split(separator: " ").last == "160000"
                 } else if line.hasPrefix("deleted file mode ") {
                     status = "D"; metadataChanged = true
+                    oldMode = line.split(separator: " ").last.map(String.init)
                     gitlink = gitlink || line.split(separator: " ").last == "160000"
                 } else if line.hasPrefix("old mode ") || line.hasPrefix("new mode ") {
                     metadataChanged = true
@@ -115,8 +119,27 @@ public enum DiffParser {
             files.append(FileDiff(path: path, oldPath: oldPath, status: status, hunks: hunks, isBinary: binary,
                                   fingerprint: fingerprint, category: FileClassifier.classify(path),
                                   hasMetadataChanges: metadataChanged, isGitlink: gitlink))
+            modes.append((oldMode, newMode))
         }
-        return files
+        var result: [FileDiff] = []
+        let indices = Dictionary(grouping: files.indices, by: { files[$0].path })
+        for index in files.indices {
+            let file = files[index]
+            let group = indices[file.path]!
+            if group.count == 1 { result.append(file); continue }
+            guard group.count == 2,
+                  let deletion = group.first(where: { files[$0].status == "D" }),
+                  let addition = group.first(where: { files[$0].status == "A" }),
+                  files[deletion].oldPath == file.path, files[addition].oldPath == file.path,
+                  let oldMode = modes[deletion].old, let newMode = modes[addition].new,
+                  oldMode.dropLast(3) != newMode.dropLast(3) else {
+                throw DiffParseError.malformed(line: 1, detail: "Unsupported duplicate file path '\(file.path)'. Refresh the comparison or report this Git patch.")
+            }
+            if index == group[0] {
+                result.append(.typeReplacement(deleted: files[deletion], added: files[addition]))
+            }
+        }
+        return result
     }
 
     private static func stripPrefix(_ path: String) -> String {

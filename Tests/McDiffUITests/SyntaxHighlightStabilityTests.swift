@@ -5,6 +5,57 @@ import XCTest
 
 final class SyntaxHighlightStabilityTests: XCTestCase {
     @MainActor
+    func testVisibleSyntaxSurvivesCacheEviction() async throws {
+        _ = NSApplication.shared
+        let file = FileDiff(path: "source.swift", hunks: [DiffHunk(header: "", lines: [
+            DiffLine(kind: .addition, text: "let value = true", oldNumber: nil, newNumber: 1)
+        ])], fingerprint: "source")
+        let view = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 900))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        view.expanded = [file.path]
+        view.setFiles([file], presentations: [file.path: DiffPresentation.rows(for: file)])
+        view.layoutSubtreeIfNeeded()
+        try await wait { view.richText(file: file, side: .new, line: 1) != nil }
+        let colored = try XCTUnwrap(view.richText(file: file, side: .new, line: 1))
+        for _ in 0..<5 {
+            view.highlights.removeAllObjects()
+            XCTAssertEqual(view.richText(file: file, side: .new, line: 1), colored)
+            view.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+            XCTAssertEqual(view.richText(file: file, side: .new, line: 1), colored)
+        }
+        XCTAssertFalse(window.isVisible)
+    }
+
+    @MainActor
+    func testOffscreenSyntaxIsNotRetainedOutsideTheCache() async throws {
+        _ = NSApplication.shared
+        let files = ["first.swift", "second.swift"].map { path in
+            FileDiff(path: path, hunks: [DiffHunk(header: "", lines: (1...100).map { number in
+                DiffLine(kind: .addition, text: "let value = true", oldNumber: nil, newNumber: number)
+            })], fingerprint: path)
+        }
+        let view = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 900))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        view.expanded = Set(files.map(\.path))
+        view.setFiles(files, presentations: Dictionary(uniqueKeysWithValues: files.map {
+            ($0.path, DiffPresentation.rows(for: $0))
+        }))
+        view.layoutSubtreeIfNeeded()
+        try await wait { view.richText(file: files[0], side: .new, line: 1) != nil }
+        view.navigate(to: 1)
+        try await wait { view.richText(file: files[1], side: .new, line: 1) != nil }
+        view.highlights.removeAllObjects()
+        XCTAssertNil(view.richText(file: files[0], side: .new, line: 1))
+        XCTAssertNotNil(view.richText(file: files[1], side: .new, line: 1))
+        view.navigate(to: 0)
+        try await wait { view.richText(file: files[0], side: .new, line: 1) != nil }
+        XCTAssertFalse(window.isVisible)
+    }
+
+    @MainActor
     private func wait(_ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition() {

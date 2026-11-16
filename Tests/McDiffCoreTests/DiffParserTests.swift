@@ -2,6 +2,14 @@ import XCTest
 @testable import McDiffCore
 
 final class DiffParserTests: XCTestCase {
+    func testUnsupportedDuplicatePathsAreReported() throws {
+        let record = "diff --git a/x b/x\nold mode 100644\nnew mode 100755\n"
+        XCTAssertThrowsError(try DiffParser.parse(record + record)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("x"))
+            XCTAssertTrue(error.localizedDescription.contains("Refresh"))
+        }
+    }
+
     func testLineNumbersAndNoNewlineMarker() throws {
         let file = try XCTUnwrap(DiffParser.parse("""
         diff --git a/file.txt b/file.txt

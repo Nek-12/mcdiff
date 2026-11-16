@@ -84,6 +84,7 @@ public struct FileDiff: Identifiable, Sendable {
     public let isGitlink: Bool
     public let fingerprint: String
     public let category: FileCategory
+    /// Content classification; metadata is governed independently by review filters.
     public let isWhitespaceAndImportsOnly: Bool
     public let whitespaceChanges: WhitespaceChanges
     public let hasMetadataChanges: Bool
@@ -118,6 +119,24 @@ public struct FileDiff: Identifiable, Sendable {
         self.whitespaceChanges = WhitespaceChanges(whitespaceChanges)
         self.hasMetadataChanges = hasMetadataChanges
         self.isGitlink = isGitlink
+    }
+
+    /// Git emits a type replacement as a complete deletion followed by an
+    /// addition. One replacement hunk keeps both source coordinate systems valid.
+    static func typeReplacement(deleted: FileDiff, added: FileDiff) -> FileDiff {
+        let lines = deleted.hunks.flatMap(\.lines) + added.hunks.flatMap(\.lines)
+        let oldCount = deleted.deletions, newCount = added.additions
+        let hunks = lines.isEmpty ? [] : [
+            DiffHunk(header: "@@ -\(oldCount == 0 ? 0 : 1),\(oldCount) +\(newCount == 0 ? 0 : 1),\(newCount) @@",
+                     lines: lines, oldRange: 0..<oldCount, newRange: 0..<newCount,
+                     noFinalNewlineSides: deleted.hunks.reduce(into: Set<DiffSide>()) { $0.formUnion($1.noFinalNewlineSides) }
+                        .union(added.hunks.reduce(into: Set<DiffSide>()) { $0.formUnion($1.noFinalNewlineSides) }))
+        ]
+        return FileDiff(path: added.path, oldPath: deleted.oldPath, status: "T", hunks: hunks,
+                        isBinary: deleted.isBinary || added.isBinary,
+                        fingerprint: ReviewStore.digest(deleted.fingerprint + "\n" + added.fingerprint),
+                        category: added.category, hasMetadataChanges: true,
+                        isGitlink: deleted.isGitlink || added.isGitlink)
     }
 }
 
@@ -236,7 +255,9 @@ public struct ReviewFilters: Codable, Sendable {
         if metaChanges && (file.isRemovalOnly || (file.hasMetadataChanges && file.additions == 0 && file.deletions == 0)) {
             return "Meta changes"
         }
-        if whitespaceAndImports && file.isWhitespaceAndImportsOnly { return "Whitespace / imports" }
+        if whitespaceAndImports && file.isWhitespaceAndImportsOnly && (!file.hasMetadataChanges || metaChanges) {
+            return "Whitespace / imports"
+        }
         switch file.category {
         case .tests: return tests ? "Tests" : nil
         case .documentation: return documentation ? "Documentation / non-code" : nil

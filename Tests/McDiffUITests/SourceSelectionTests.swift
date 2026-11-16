@@ -6,6 +6,56 @@ import XCTest
 
 final class SourceSelectionTests: XCTestCase {
     @MainActor
+    func testEntireGutterSelectsOriginalSideWithoutCapturingSource() async throws {
+        for layout in [DiffLayout.split, .unified] {
+            let (view, window) = try await fixture(layout: layout)
+            defer { window.close() }
+            let index = try row(view, side: .new, number: 20)
+            let width = view.sourceGutter(file: 0).textLeading
+            for x in stride(from: CGFloat(0), to: width, by: 1) {
+                let expected: DiffSide = layout == .unified && x >= view.sourceGutter(file: 0).commentDivider ? .new : .old
+                XCTAssertEqual(view.numberSide(row: index, point: NSPoint(x: x, y: 0)), expected)
+                if layout == .split {
+                    XCTAssertEqual(view.numberSide(row: index, point: NSPoint(x: view.table.bounds.width / 2 + x, y: 0)), .new)
+                }
+            }
+            XCTAssertNil(view.numberSide(row: index, point: NSPoint(x: width, y: 0)))
+        }
+    }
+
+    @MainActor
+    func testUnifiedAdditionAndDeletionUseWholeGutterForCommentDrag() async throws {
+        for side in [DiffSide.old, .new] {
+            let (view, window) = try await fixture(layout: .unified)
+            defer { window.close() }
+            let lines = (1...3).map {
+                DiffLine(kind: side == .old ? .deletion : .addition, text: "value\($0)",
+                         oldNumber: side == .old ? $0 : nil, newNumber: side == .new ? $0 : nil)
+            }
+            let file = FileDiff(path: "changed.swift", hunks: [DiffHunk(header: "", lines: lines)], fingerprint: "changed")
+            view.expanded = [file.path]
+            view.setFiles([file], presentations: [file.path: DiffPresentation.rows(for: file)])
+            try await ready(view)
+            let first = try row(view, side: side, number: 1)
+            let last = try row(view, side: side, number: 3)
+            let width = view.sourceGutter(file: 0).textLeading
+            var comments: [LineSelection] = []
+            view.onComment = { comments.append($0) }
+            for x in [CGFloat(0), width / 2, width - 1] {
+                let anchor = try XCTUnwrap(view.beginPointerSelection(row: first,
+                    point: NSPoint(x: x, y: view.table.rect(ofRow: first).minY + 5), shift: false))
+                view.updatePointerSelection(row: last,
+                    point: NSPoint(x: x, y: view.table.rect(ofRow: last).minY + 5), anchor: anchor)
+                view.endPointerSelection(anchor)
+                XCTAssertEqual(comments.last?.side, side)
+                XCTAssertEqual(comments.last?.start, 1)
+                XCTAssertEqual(comments.last?.end, 3)
+            }
+            XCTAssertEqual(comments.count, 3)
+        }
+    }
+
+    @MainActor
     private func fixture(layout: DiffLayout = .split, texts: [String] = ["alpha beta", "second line", "last value"]) async throws -> (DiffViewport, NSWindow) {
         _ = NSApplication.shared
         let viewport = DiffViewport(frame: NSRect(x: 0, y: 0, width: 1000, height: 600))
@@ -208,27 +258,24 @@ final class SourceSelectionTests: XCTestCase {
     }
 
     @MainActor
-    func testDiffSpaceAndReturnToggleReviewWithoutAdvancingAndRespectAutoReview() async throws {
+    func testDiffReviewKeysRequestReviewAndNextIncludingAutomaticallyReviewedFiles() async throws {
         let (viewport, window) = try await fixture()
         defer { window.close() }
-        var reviewed = false
-        var actions = 0
-        viewport.isReviewed = { _ in reviewed }
-        viewport.onReviewToggle = { _, value in reviewed = value; actions += 1 }
+        var actions: [Int] = []
+        viewport.onReviewNext = { actions.append($0) }
+        viewport.onReviewToggle = { _, _ in XCTFail("Review shortcuts must not toggle checkboxes") }
         for (characters, code) in [(" ", UInt16(49)), ("\r", 36)] {
             let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
                 timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: characters,
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
             viewport.table.keyDown(with: event)
         }
-        XCTAssertEqual(actions, 2)
-        XCTAssertFalse(reviewed)
-        XCTAssertEqual(viewport.focusedFile, 0)
+        XCTAssertEqual(actions, [0, 0])
         let skipped = FileDiff(path: "README.md", hunks: [], fingerprint: "docs", category: .documentation)
         viewport.setFiles([skipped], presentations: [:])
         viewport.filters.documentation = true
-        viewport.toggleFocusedReviewed()
-        XCTAssertEqual(actions, 2)
+        viewport.reviewFocusedAndNext()
+        XCTAssertEqual(actions, [0, 0, 0])
     }
 
     @MainActor

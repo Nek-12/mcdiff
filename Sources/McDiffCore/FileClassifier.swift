@@ -62,7 +62,8 @@ public enum FileClassifier {
         let oldExtension = (file.oldPath as NSString).pathExtension.lowercased()
         let newExtension = (file.path as NSString).pathExtension.lowercased()
         let old = SourceLexing(oldContent, ext: oldExtension), new = SourceLexing(newContent, ext: newExtension)
-        let wholeFile = file.status == "M" && !file.hasMetadataChanges &&
+        let wholeFile = file.status != "A" && file.status != "D" &&
+            oldContent != newContent &&
             isWhitespaceAndImportsOnly(old: old, new: new, oldExtension: oldExtension, newExtension: newExtension)
         guard let oldNormalized = old.normalized, let newNormalized = new.normalized else { return (wholeFile, []) }
         var changes: [WhitespaceChange] = []

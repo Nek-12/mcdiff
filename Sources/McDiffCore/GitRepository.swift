@@ -69,6 +69,10 @@ public struct GitRepository: Sendable {
                 files.append(try repository.untrackedFile(filePath))
             }
         }
+        var paths: Set<String> = []
+        for file in files where !paths.insert(file.path).inserted {
+            throw GitError("Unsupported duplicate file path '\(file.path)'. Refresh the comparison or report this Git patch.")
+        }
         files = try repository.classifyWhitespaceAndImports(files, base: base)
         files.sort { $0.path < $1.path }
         let canonical = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
@@ -270,7 +274,7 @@ public struct GitRepository: Sendable {
             let file = files[index]
             guard !file.isBinary, !file.isGitlink,
                   !file.hunks.isEmpty, FileClassifier.supportsWhitespaceAndImportsComparison(path: file.path) else { return false }
-            let wholeFileCandidate = file.status == "M" && !file.hasMetadataChanges &&
+            let wholeFileCandidate = file.status != "A" && file.status != "D" &&
                 DiffPresentation.mayBeWhitespaceAndImportsOnly(file)
             return wholeFileCandidate || DiffPresentation.mayHaveWhitespaceLines(file)
         }

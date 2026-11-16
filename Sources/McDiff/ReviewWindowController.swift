@@ -366,10 +366,10 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         home.onAuthenticationRequired = { [weak self] in self?.setAccount(.signedOut) }
         diff.isReviewed = { [weak self] in self?.isReviewed($0) ?? false }
         diff.onReviewToggle = { [weak self] file, reviewed in self?.setReviewed(file, reviewed: reviewed) }
-        sidebar.onToggleReviewed = { [weak self] in
+        diff.onReviewNext = { [weak self] in self?.reviewAndAdvance(from: $0) }
+        sidebar.onReviewNext = { [weak self] in
             guard let self, self.sidebarIndices.indices.contains(self.sidebar.selectedRow) else { return }
-            let file = self.files[self.sidebarIndices[self.sidebar.selectedRow]]
-            self.setReviewed(file, reviewed: !self.isReviewed(file))
+            self.reviewAndAdvance(from: self.sidebarIndices[self.sidebar.selectedRow])
         }
         diff.onFinishReview = { [weak self] in self?.finishReview() }
         diff.onFocus = { [weak self] index in
@@ -721,16 +721,22 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
         if let snapshot { try store?.saveProgress(progress, identity: snapshot.identity) }
     }
     @objc private func markAndNext() {
-        guard screen == .review, !busy, files.indices.contains(focused) else { return }
-        let file = files[focused], prior = progress
-        progress.reviewed[file.path] = file.fingerprint
-        do { try saveProgress() } catch { progress = prior; showError(error, title: "Could not save review progress"); return }
+        reviewAndAdvance(from: focused)
+    }
+    private func reviewAndAdvance(from index: Int) {
+        guard isReviewReady, !busy, files.indices.contains(index), settleDraft() else { return }
+        let file = files[index]
+        if !isReviewed(file) {
+            let prior = progress
+            progress.reviewed[file.path] = file.fingerprint
+            do { try saveProgress() } catch { progress = prior; showError(error, title: "Could not save review progress"); return }
+        }
         diff.expanded.remove(file.path)
-        let next = ((focused + 1)..<files.count).first { !isReviewed(files[$0]) } ?? (0..<focused).first { !isReviewed(files[$0]) }
+        let next = ((index + 1)..<files.count).first { !isReviewed(files[$0]) } ?? (0..<index).first { !isReviewed(files[$0]) }
         diff.rebuild()
         refreshReviewState()
         if let next { diff.navigate(to: next); focus(next) }
-        else { showStatus("All files reviewed."); diff.navigate(to: focused, expand: false) }
+        else { showStatus("All files reviewed."); diff.navigate(to: index, expand: false); focus(index) }
         updateActions()
     }
     private func setReviewed(_ file: FileDiff, reviewed: Bool) {
@@ -1176,12 +1182,12 @@ final class ReviewWindowController: NSWindowController, NSTableViewDataSource, N
 }
 
 private final class ReviewSidebarTableView: NSTableView {
-    var onToggleReviewed: (() -> Void)?
+    var onReviewNext: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if modifiers.isEmpty, [" ", "\r", "\u{3}"].contains(event.charactersIgnoringModifiers ?? "") {
-            onToggleReviewed?()
+            onReviewNext?()
         } else {
             super.keyDown(with: event)
         }

@@ -24,6 +24,95 @@ final class GitRepositoryTests: XCTestCase {
         try repo.load(.init(repository: root.path, base: base, target: target, mergeBase: mergeBase))
     }
 
+    func testTypeChangesPreserveBothSourcesInWorktreeAndRevision() throws {
+        for reversed in [false, true] {
+            for source in ["let value = 1\nlet other = 2\n", "let value = 1", "", " \n", "binary\0data"] {
+                let path = "type-change.swift"
+                let url = root.appendingPathComponent(path)
+                if FileManager.default.fileExists(atPath: url.path) ||
+                    (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil {
+                    try FileManager.default.removeItem(at: url)
+                }
+                if reversed {
+                    try FileManager.default.createSymbolicLink(atPath: url.path, withDestinationPath: "target.swift")
+                } else {
+                    try write(path, source)
+                }
+                _ = try repo.git(["add", "."])
+                _ = try repo.git(["commit", "--allow-empty", "-m", "type baseline"])
+                let base = try repo.revision("HEAD")
+                try FileManager.default.removeItem(at: url)
+                if reversed { try write(path, source) }
+                else { try FileManager.default.createSymbolicLink(atPath: url.path, withDestinationPath: "target.swift") }
+                func verify(_ snapshot: ReviewSnapshot) throws -> String {
+                    XCTAssertEqual(snapshot.files.filter { $0.path == path }.count, 1)
+                    let file = try XCTUnwrap(snapshot.files.first { $0.path == path })
+                    XCTAssertEqual(file.status, "T")
+                    XCTAssertTrue(file.hasMetadataChanges)
+                    XCTAssertEqual(file.isBinary, source.contains("\0"))
+                    XCTAssertEqual(try repo.content(snapshot: snapshot, file: file, side: .old), reversed ? "target.swift" : source)
+                    XCTAssertEqual(try repo.content(snapshot: snapshot, file: file, side: .new), reversed ? source : "target.swift")
+                    if !file.isBinary {
+                        XCTAssertEqual(file.hunks.count, 1)
+                        let hunk = try XCTUnwrap(file.hunks.first)
+                        XCTAssertEqual(hunk.oldRange?.lowerBound, 0)
+                        XCTAssertEqual(hunk.newRange?.lowerBound, 0)
+                        XCTAssertEqual(hunk.lines.compactMap(\.oldNumber), (0..<file.deletions).map { $0 + 1 })
+                        XCTAssertEqual(hunk.lines.compactMap(\.newNumber), (0..<file.additions).map { $0 + 1 })
+                        XCTAssertEqual(hunk.noFinalNewlineSides.contains(reversed ? .old : .new), true)
+                        // This validates canonical patch reconstruction against Git on both sides.
+                        _ = try repo.contextPresentation(snapshot: snapshot, file: file)
+                        _ = DiffPresentation.rows(for: file)
+                    }
+                    return file.fingerprint
+                }
+                let fingerprint = try verify(load(base: base, mergeBase: false))
+                _ = try repo.git(["add", "."])
+                XCTAssertEqual(try verify(load(base: base, mergeBase: false)), fingerprint)
+                _ = try repo.git(["commit", "-m", "type change"])
+                XCTAssertEqual(try verify(load(base: base, target: "HEAD", mergeBase: false)), fingerprint)
+            }
+        }
+    }
+
+    func testStagedDeletionAndUntrackedRecreationReportsUnsupportedDuplicateWithoutIndexMutation() throws {
+        _ = try repo.git(["rm", "tracked.swift"])
+        try write("tracked.swift", "replacement\nsecond line\n")
+        let index = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+        XCTAssertThrowsError(try load()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("tracked.swift"))
+            XCTAssertTrue(error.localizedDescription.contains("Refresh"))
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), index)
+    }
+
+    func testRenamedImportsRequireBothExclusionsInWorktreeAndRevision() throws {
+        let body = (1...40).map { "var value\($0) = \($0)\n" }.joined()
+        try write("before.go", "package runtime\nimport \"old/path\"\n" + body)
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "import rename baseline"])
+        _ = try repo.git(["mv", "before.go", "after.go"])
+        try write("after.go", "package agentruntime\nimport \"new/path\"\n" + body)
+        func verify(_ snapshot: ReviewSnapshot) throws {
+            let file = try XCTUnwrap(snapshot.files.first { $0.path == "after.go" })
+            XCTAssertTrue(file.status.hasPrefix("R"))
+            XCTAssertTrue(file.hasMetadataChanges)
+            for imports in [false, true] {
+                for meta in [false, true] {
+                    let filters = ReviewFilters(whitespaceAndImports: imports, metaChanges: meta)
+                    XCTAssertEqual(filters.skipReason(for: file) != nil, imports && meta)
+                }
+            }
+        }
+        try verify(load())
+        _ = try repo.git(["add", "."])
+        _ = try repo.git(["commit", "-m", "renamed imports"])
+        try verify(load(base: "HEAD~1", target: "HEAD", mergeBase: false))
+        try write("after.go", "package agentruntime\nimport \"new/path\"\n" + body + "var meaningful = true\n")
+        let changed = try XCTUnwrap(load(base: "HEAD~1").files.first { $0.path == "after.go" })
+        XCTAssertNil(ReviewFilters(whitespaceAndImports: true, metaChanges: true).skipReason(for: changed))
+    }
+
     func testWorktreeIncludesCommittedStagedUnstagedAndUntrackedWithoutIndexMutation() throws {
         _ = try repo.git(["checkout", "-b", "feature"])
         try write("committed.swift", "committed\n")
@@ -739,9 +828,13 @@ final class GitRepositoryTests: XCTestCase {
         let snapshot = try load()
         XCTAssertEqual(snapshot.files.first { $0.path == "Odd \"path\"\t\n.kt" }?.isWhitespaceAndImportsOnly, true)
         XCTAssertEqual(snapshot.files.first { $0.path == "indent.py" }?.isWhitespaceAndImportsOnly, true)
-        for name in ["literal.kt", "raw.kt", "mode.kt"] {
+        for name in ["literal.kt", "raw.kt"] {
             XCTAssertEqual(snapshot.files.first { $0.path == name }?.isWhitespaceAndImportsOnly, false, name)
         }
+        let mode = try XCTUnwrap(snapshot.files.first { $0.path == "mode.kt" })
+        XCTAssertTrue(mode.isWhitespaceAndImportsOnly)
+        XCTAssertNil(ReviewFilters(whitespaceAndImports: true, metaChanges: false).skipReason(for: mode))
+        XCTAssertNotNil(ReviewFilters(whitespaceAndImports: true, metaChanges: true).skipReason(for: mode))
         _ = try repo.git(["add", "."])
         _ = try repo.git(["commit", "-m", "format changes"])
         let committed = try load(base: "HEAD~1", target: "HEAD", mergeBase: false)
@@ -868,7 +961,9 @@ final class GitRepositoryTests: XCTestCase {
         XCTAssertTrue(literal.whitespaceChanges.isEmpty)
         XCTAssertFalse(literal.isWhitespaceAndImportsOnly)
         let mode = try file("mode.kt")
-        XCTAssertFalse(mode.isWhitespaceAndImportsOnly)
+        XCTAssertTrue(mode.isWhitespaceAndImportsOnly)
+        XCTAssertNil(ReviewFilters(whitespaceAndImports: true, metaChanges: false).skipReason(for: mode))
+        XCTAssertNotNil(ReviewFilters(whitespaceAndImports: true, metaChanges: true).skipReason(for: mode))
         XCTAssertEqual(DiffPresentation.ignoringWhitespace(in: pairs(mode), file: mode).first?.new?.kind, .context)
         let imports = try file("imports.kt")
         let importsPairs = DiffPresentation.ignoringWhitespace(in: pairs(imports), file: imports)

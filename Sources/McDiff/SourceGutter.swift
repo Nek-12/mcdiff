@@ -13,6 +13,7 @@ struct SourceGutter {
     }
 
     var numberTrailing: CGFloat { numberWidth }
+    var commentDivider: CGFloat { numberWidth + Self.columnGap / 2 }
 
     func columnOffset(_ side: DiffSide) -> CGFloat {
         layout == .unified && side == .new ? numberWidth + Self.columnGap : 0
